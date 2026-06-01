@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  r-nads:
+    build: .
+    container_name: r-nads
+    restart: unless-stopped
+    # Host networking mode allows capturing traffic directly from the host's physical interfaces
+    network_mode: host
+    # Allow the container to execute packet captures on host interfaces
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      # Mount configuration for easy runtime tweaks (dynamic reload watches this file)
+      - ./config.toml:/app/config.toml
+      # Persist the SVDD trained model parameters
+      - ./model.json:/app/model.json
+      # Persist SQLite anomalies forensics database
+      - ./anomalies.db:/app/anomalies.db
+      # Persist textual alert logs
+      - ./r-nads.log:/app/r-nads.log
