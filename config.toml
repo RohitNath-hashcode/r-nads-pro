@@ -1,0 +1,16 @@
+[system]
+mode = "classify"
+workers = 4
+capacity = 65536
+database_path = "anomalies.db"
+log_path = "r-nads.log"
+block_list_ttl = 3600
+nginx_bind = "127.0.0.1:8080"
+capture_source = "mock"
+pps = 10000
+flows = 1000
+pcap_file = "test.pcap"
+interface = "eth0"
+training_samples = 10000
+mitigation_mode = "mitigate"
+model_path = "model.json"

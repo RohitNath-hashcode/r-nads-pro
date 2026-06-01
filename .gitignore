@@ -1,0 +1,7 @@
+/target
+/anomalies.db
+/anomalies.db-journal
+/test_anomalies.db
+/test_anomalies.db-journal
+/r-nads.log
+/test_r-nads.log

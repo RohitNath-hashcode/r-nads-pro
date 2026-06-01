@@ -1,0 +1,13 @@
+[package]
+name = "r-nads-producer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+r-nads-common = { path = "../r-nads-common" }
+etherparse = "0.13"
+pcap-file = "2.0"
+crossbeam-channel = "0.5"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+pcap = "1.1"

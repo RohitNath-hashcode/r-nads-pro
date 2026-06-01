@@ -1,0 +1,18 @@
+[package]
+name = "r-nads-aggregator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+r-nads-common = { path = "../r-nads-common" }
+crossbeam-channel = "0.5"
+slab = "0.4"
+hashbrown = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "flow_table_bench"
+harness = false
