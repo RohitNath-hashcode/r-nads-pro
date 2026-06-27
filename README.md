@@ -4,6 +4,8 @@ R-NADS is an enterprise-grade, high-performance network anomaly detection system
 
 The system operates directly at the packet-ingestion layer, performing flow aggregation, feature extraction, real-time SVDD inference, database logging, and HTTP-based mitigation checks.
 
+Demo Video: https://drive.google.com/file/d/19tsmBNHZvDEH2FJ5YuUeGYiAVurmGr6F/view?usp=sharing
+
 ---
 
 ## 1. Pipeline Architecture
