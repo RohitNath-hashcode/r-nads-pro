@@ -1,0 +1,11 @@
+[package]
+name = "r-nads-aggregator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+r-nads-common = { path = "../../core/r-nads-common" }
+hashbrown = "0.14"
+slab = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+

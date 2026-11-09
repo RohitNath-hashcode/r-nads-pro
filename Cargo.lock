@@ -786,26 +786,115 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
-name = "r-nads"
+name = "r-nads-agent"
 version = "0.1.0"
 dependencies = [
  "ahash",
  "clap",
- "criterion",
  "crossbeam-channel",
  "ctrlc",
  "dashmap",
- "etherparse",
- "hashbrown 0.14.5",
- "once_cell",
- "pcap",
- "pcap-file",
+ "r-nads-aggregator",
+ "r-nads-common",
+ "r-nads-config",
+ "r-nads-decision",
+ "r-nads-events",
+ "r-nads-inference",
+ "r-nads-nginx",
+ "r-nads-producer",
  "rusqlite",
  "serde",
  "serde_json",
- "slab",
- "tiny_http",
  "toml",
+]
+
+[[package]]
+name = "r-nads-aggregator"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.14.5",
+ "r-nads-common",
+ "serde",
+ "slab",
+]
+
+[[package]]
+name = "r-nads-benches"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "r-nads-aggregator",
+ "r-nads-common",
+ "r-nads-inference",
+]
+
+[[package]]
+name = "r-nads-common"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "serde",
+]
+
+[[package]]
+name = "r-nads-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "r-nads-decision"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "r-nads-events"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "r-nads-inference"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "r-nads-aggregator",
+ "r-nads-common",
+ "r-nads-events",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "r-nads-nginx"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "r-nads-config",
+ "r-nads-decision",
+ "rusqlite",
+ "serde_json",
+ "tiny_http",
+]
+
+[[package]]
+name = "r-nads-producer"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "etherparse",
+ "pcap",
+ "pcap-file",
+ "r-nads-common",
 ]
 
 [[package]]

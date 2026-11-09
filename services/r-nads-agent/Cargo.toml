@@ -1,0 +1,31 @@
+[package]
+name = "r-nads-agent"
+version = "0.1.0"
+edition = "2021"
+description = "R-NADS Production Security Agent Daemon"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+crossbeam-channel = "0.5"
+ahash = "0.8"
+ctrlc = "3.4"
+dashmap = "5.5"
+
+r-nads-common = { path = "../../crates/core/r-nads-common" }
+r-nads-config = { path = "../../crates/core/r-nads-config" }
+r-nads-decision = { path = "../../crates/core/r-nads-decision" }
+r-nads-events = { path = "../../crates/core/r-nads-events" }
+r-nads-aggregator = { path = "../../crates/network/r-nads-aggregator" }
+r-nads-inference = { path = "../../crates/network/r-nads-inference" }
+r-nads-producer = { path = "../../crates/network/r-nads-producer" }
+r-nads-nginx = { path = "../../crates/enforcement/r-nads-nginx" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rusqlite = { version = "0.31" }
+

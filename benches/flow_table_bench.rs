@@ -2,8 +2,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-use r_nads::analysis::aggregator::{FlowKey, FlowMetrics, FlowTable, PacketEvent};
-use r_nads::ml::svdd::{InferenceEngine, ModelConfig, MODEL_CONFIG};
+use r_nads_aggregator::{FlowMetrics, FlowTable};
+use r_nads_common::{FlowKey, PacketEvent};
+use r_nads_inference::{InferenceEngine, ModelConfig, MODEL_CONFIG};
 
 fn setup_benchmark_model() {
     let _ = MODEL_CONFIG.set(ModelConfig {

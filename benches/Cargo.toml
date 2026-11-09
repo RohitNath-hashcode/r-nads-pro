@@ -1,0 +1,17 @@
+[package]
+name = "r-nads-benches"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+r-nads-common = { path = "../crates/core/r-nads-common" }
+r-nads-aggregator = { path = "../crates/network/r-nads-aggregator" }
+r-nads-inference = { path = "../crates/network/r-nads-inference" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "flow_table_bench"
+path = "flow_table_bench.rs"
+harness = false
