@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use r_nads_aggregator::FlowMetrics;
 use r_nads_events::AnomalyAlert;
 use serde::{Deserialize, Serialize};

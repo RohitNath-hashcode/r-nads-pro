@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -200,6 +202,76 @@ pub trait MitigationProvider: Send + Sync {
     fn health_check(&self) -> Result<ProviderHealth, MitigationError>;
 }
 
+/// Pluggable time source trait for deterministic unit testing and simulation.
+pub trait TimeSource: Send + Sync {
+    fn current_timestamp_secs(&self) -> i64;
+    fn current_timestamp_millis(&self) -> u64;
+}
+
+/// Production time source backed by the system clock.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemTimeSource;
+
+impl TimeSource for SystemTimeSource {
+    fn current_timestamp_secs(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+    fn current_timestamp_millis(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+}
+
+/// Mock time source for deterministic testing of timeouts, sliding windows, and TTL expiration.
+#[derive(Debug, Default)]
+pub struct MockTimeSource {
+    current_millis: std::sync::atomic::AtomicU64,
+}
+
+impl MockTimeSource {
+    pub fn new(initial_millis: u64) -> Self {
+        Self {
+            current_millis: std::sync::atomic::AtomicU64::new(initial_millis),
+        }
+    }
+    pub fn advance_millis(&self, delta: u64) {
+        self.current_millis
+            .fetch_add(delta, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl TimeSource for MockTimeSource {
+    fn current_timestamp_secs(&self) -> i64 {
+        (self
+            .current_millis
+            .load(std::sync::atomic::Ordering::SeqCst)
+            / 1000) as i64
+    }
+    fn current_timestamp_millis(&self) -> u64 {
+        self.current_millis
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Pluggable security decision evaluator trait (Dependency Injection).
+pub trait DecisionEngine: Send + Sync {
+    fn evaluate(&self, client_ip: IpAddr) -> SecurityDecision;
+    fn record_evidence(&self, evidence: SecurityEvidence);
+}
+
+/// Pluggable telemetry sink for security alerts (Dependency Injection).
+pub trait AlertSink: Send + Sync {
+    fn emit_alert(
+        &self,
+        decision: &SecurityDecision,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +288,16 @@ mod tests {
 
         let mitigate_dec = SecurityDecision::from_anomaly(true, "mitigate", 1.45, 30, 1);
         assert_eq!(mitigate_dec.action, DecisionAction::Deny);
+    }
+
+    #[test]
+    fn test_mock_time_source_dependency_injection() {
+        let time_source = MockTimeSource::new(1_000_000);
+        assert_eq!(time_source.current_timestamp_millis(), 1_000_000);
+        assert_eq!(time_source.current_timestamp_secs(), 1000);
+
+        time_source.advance_millis(5000);
+        assert_eq!(time_source.current_timestamp_millis(), 1_005_000);
+        assert_eq!(time_source.current_timestamp_secs(), 1005);
     }
 }

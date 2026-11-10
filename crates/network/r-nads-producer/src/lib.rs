@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use etherparse::{InternetSlice, SlicedPacket, TransportSlice};
 use r_nads_common::{PacketEvent, PacketFlags};
 use std::net::IpAddr;

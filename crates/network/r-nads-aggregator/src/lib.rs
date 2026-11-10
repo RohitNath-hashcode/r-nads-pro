@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use hashbrown::HashMap;
 use r_nads_common::{Direction, FlowKey, PacketEvent};
 use serde::{Deserialize, Serialize};

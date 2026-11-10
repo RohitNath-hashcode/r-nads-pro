@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use ahash::AHasher;
 use clap::Parser;
 use crossbeam_channel::{bounded, unbounded};

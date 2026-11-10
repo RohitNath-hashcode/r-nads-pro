@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::SystemTime;

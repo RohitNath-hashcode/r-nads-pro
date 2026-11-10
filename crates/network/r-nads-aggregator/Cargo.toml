@@ -9,3 +9,5 @@ hashbrown = "0.14"
 slab = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 
+[dev-dependencies]
+r-nads-decision = { path = "../../core/r-nads-decision" }

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use dashmap::DashMap;
 use r_nads_config::SystemConfig;
 use r_nads_decision::{DecisionAction, SecurityDecision};
