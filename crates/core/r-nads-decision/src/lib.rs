@@ -218,4 +218,3 @@ mod tests {
         assert_eq!(mitigate_dec.action, DecisionAction::Deny);
     }
 }
-

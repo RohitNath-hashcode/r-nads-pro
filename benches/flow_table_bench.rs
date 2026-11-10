@@ -8,6 +8,9 @@ use r_nads_inference::{InferenceEngine, ModelConfig, MODEL_CONFIG};
 
 fn setup_benchmark_model() {
     let _ = MODEL_CONFIG.set(ModelConfig {
+        version: "1.1.0".to_string(),
+        trained_at: 1700000000,
+        baseline_distance: 0.5,
         threshold: 1.5,
         means: [
             100.0, 10.0, 1000.0, 10000.0, 1.0, 0.1, 0.05, 0.05, 0.1, 0.8, 50.0, 10.0,
@@ -36,6 +39,7 @@ fn bench_flow_table(c: &mut Criterion) {
         dest_port: 80,
         protocol: 6,
         tcp_flags: Some(0x02), // SYN
+        flags: r_nads_common::PacketFlags::default(),
     };
 
     // Pre-populate flow table slightly to warm up Slab/HashMap
@@ -86,6 +90,8 @@ fn bench_inference(c: &mut Criterion) {
         ack_ratio: 0.8,
         mean_interval: 12.5,
         var_interval: 4.2,
+        malformed_count: 0,
+        fragment_count: 0,
     };
 
     c.bench_function("inference_predict", |b| {

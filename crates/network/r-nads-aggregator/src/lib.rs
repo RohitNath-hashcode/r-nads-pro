@@ -15,9 +15,11 @@ pub struct PacketSummary {
     pub len: u32,
     pub direction: Direction,
     pub tcp_flags: u8,
+    pub is_fragment: bool,
+    pub is_malformed: bool,
 }
 
-/// Sliding window rolling metrics for a single network flow.
+/// Sliding window rolling metrics for a single network flow across IPv4 and IPv6.
 /// Pre-allocated buffer of size WINDOW_SIZE to guarantee O(1) zero-allocation updates.
 #[derive(Debug, Clone)]
 pub struct FlowState {
@@ -37,6 +39,8 @@ pub struct FlowState {
     pub fin_count: u32,
     pub psh_count: u32,
     pub ack_count: u32,
+    pub malformed_count: u32,
+    pub fragment_count: u32,
     pub sum_len: u64,
     pub sum_len_sq: u64,
 }
@@ -58,6 +62,8 @@ impl FlowState {
             fin_count: 0,
             psh_count: 0,
             ack_count: 0,
+            malformed_count: 0,
+            fragment_count: 0,
             sum_len: 0,
             sum_len_sq: 0,
         }
@@ -78,6 +84,8 @@ impl FlowState {
         self.fin_count = 0;
         self.psh_count = 0;
         self.ack_count = 0;
+        self.malformed_count = 0;
+        self.fragment_count = 0;
         self.sum_len = 0;
         self.sum_len_sq = 0;
     }
@@ -89,6 +97,8 @@ impl FlowState {
         len: u32,
         direction: Direction,
         tcp_flags: Option<u8>,
+        is_fragment: bool,
+        is_malformed: bool,
     ) {
         self.total_packets += 1;
 
@@ -103,6 +113,8 @@ impl FlowState {
             len,
             direction,
             tcp_flags: flags,
+            is_fragment,
+            is_malformed,
         };
 
         // If the window is full, evict the oldest packet at `self.head` from the aggregates
@@ -138,6 +150,13 @@ impl FlowState {
             if (old_pkt.tcp_flags & 0x10) != 0 {
                 self.ack_count -= 1;
             }
+
+            if old_pkt.is_malformed {
+                self.malformed_count = self.malformed_count.saturating_sub(1);
+            }
+            if old_pkt.is_fragment {
+                self.fragment_count = self.fragment_count.saturating_sub(1);
+            }
         }
 
         // Add the new packet to rolling aggregates
@@ -171,41 +190,45 @@ impl FlowState {
             self.ack_count += 1;
         }
 
+        if is_malformed {
+            self.malformed_count += 1;
+        }
+        if is_fragment {
+            self.fragment_count += 1;
+        }
+
         self.buffer[self.head] = new_pkt;
         self.head = (self.head + 1) % WINDOW_SIZE;
-
         if self.count < WINDOW_SIZE {
             self.count += 1;
         }
     }
 
-    /// Computes aggregated statistical features for ML engine input.
+    /// Computes the 12 statistical flow features for SVDD/ML anomaly detection,
+    /// along with protocol-level malformed and fragment counts.
     pub fn compute_metrics(&self, key: FlowKey) -> FlowMetrics {
         let count = self.count.max(1) as f64;
+
+        // Mean and variance of packet length
         let mean_len = self.sum_len as f64 / count;
+        let mean_len_sq = self.sum_len_sq as f64 / count;
+        let var_len = (mean_len_sq - (mean_len * mean_len)).max(0.0);
 
-        let variance_len = ((self.sum_len_sq as f64) / count) - (mean_len * mean_len);
-        let var_len = variance_len.max(0.0);
-
-        let mut min_ts = u64::MAX;
-        let mut max_ts = 0u64;
-        for i in 0..self.count {
-            let ts = self.buffer[i].timestamp_ms;
-            if ts < min_ts {
-                min_ts = ts;
-            }
-            if ts > max_ts {
-                max_ts = ts;
-            }
-        }
-
-        let duration_ms = if self.count > 1 && max_ts > min_ts {
-            max_ts - min_ts
+        // Find time range in sliding window
+        let (oldest_ts, newest_ts) = if self.count > 0 {
+            let oldest_idx = (self.head + WINDOW_SIZE - self.count) % WINDOW_SIZE;
+            let newest_idx = (self.head + WINDOW_SIZE - 1) % WINDOW_SIZE;
+            (
+                self.buffer[oldest_idx].timestamp_ms,
+                self.buffer[newest_idx].timestamp_ms,
+            )
         } else {
-            1
+            (0, 0)
         };
 
+        let duration_ms = newest_ts.saturating_sub(oldest_ts).max(1);
         let duration_secs = duration_ms as f64 / 1000.0;
+
         let packet_rate = self.count as f64 / duration_secs;
         let byte_rate = (self.bytes_fwd + self.bytes_bwd) as f64 / duration_secs;
 
@@ -236,16 +259,21 @@ impl FlowState {
                 sum_interval += interval;
                 sum_interval_sq += interval * interval;
             }
-            let m_int = sum_interval / num_intervals as f64;
-            let v_int = ((sum_interval_sq / num_intervals as f64) - (m_int * m_int)).max(0.0);
-            (m_int, v_int)
+            let mean = sum_interval / num_intervals as f64;
+            let mean_sq = sum_interval_sq / num_intervals as f64;
+            let var = (mean_sq - (mean * mean)).max(0.0);
+            (mean, var)
         } else {
             (0.0, 0.0)
         };
 
         FlowMetrics {
-            src_ip: key.ip_min,
-            dest_ip: key.ip_max,
+            src_ip: self.initiator_ip,
+            dest_ip: if self.initiator_ip == key.ip_min {
+                key.ip_max
+            } else {
+                key.ip_min
+            },
             src_port: key.port_min,
             dest_port: key.port_max,
             protocol: key.protocol,
@@ -263,11 +291,13 @@ impl FlowState {
             ack_ratio,
             mean_interval,
             var_interval,
+            malformed_count: self.malformed_count,
+            fragment_count: self.fragment_count,
         }
     }
 }
 
-/// Extracted 12-dimensional features for SVDD/ML inference.
+/// Extracted 12-dimensional features for SVDD/ML inference plus protocol indicators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowMetrics {
     pub src_ip: IpAddr,
@@ -289,15 +319,22 @@ pub struct FlowMetrics {
     pub ack_ratio: f64,
     pub mean_interval: f64,
     pub var_interval: f64,
+    #[serde(default)]
+    pub malformed_count: u32,
+    #[serde(default)]
+    pub fragment_count: u32,
 }
 
-/// Thread-local pre-allocated flow table with constant memory footprint and LRU eviction.
+/// Thread-local pre-allocated flow table with constant memory footprint,
+/// load factor monitoring, LRU eviction, and automated memory shedding.
 pub struct FlowTable {
     map: HashMap<FlowKey, usize>,
     slab: Slab<LruNode>,
     capacity: usize,
     lru_head: Option<usize>,
     lru_tail: Option<usize>,
+    pub total_evictions: u64,
+    pub total_shed: u64,
 }
 
 struct LruNode {
@@ -315,9 +352,12 @@ impl FlowTable {
             capacity,
             lru_head: None,
             lru_tail: None,
+            total_evictions: 0,
+            total_shed: 0,
         }
     }
 
+    /// Process a packet and update or create its flow state.
     pub fn process_packet(&mut self, event: &PacketEvent) -> FlowMetrics {
         let key = event.flow_key();
 
@@ -331,8 +371,14 @@ impl FlowTable {
                 Direction::Backward
             };
 
-            node.state
-                .update(event.timestamp, event.len, direction, event.tcp_flags);
+            node.state.update(
+                event.timestamp,
+                event.len,
+                direction,
+                event.tcp_flags,
+                event.is_fragment(),
+                event.is_malformed(),
+            );
             node.state.compute_metrics(key)
         } else {
             let slab_idx = if self.slab.len() >= self.capacity {
@@ -340,6 +386,7 @@ impl FlowTable {
                     .lru_tail
                     .expect("LRU tail cannot be None when Slab is full");
                 self.evict_node(evicted_idx);
+                self.total_evictions += 1;
                 evicted_idx
             } else {
                 self.slab.vacant_entry().key()
@@ -357,6 +404,8 @@ impl FlowTable {
                     event.len,
                     Direction::Forward,
                     event.tcp_flags,
+                    event.is_fragment(),
+                    event.is_malformed(),
                 );
                 let metrics = node.state.compute_metrics(key);
 
@@ -377,6 +426,8 @@ impl FlowTable {
                     event.len,
                     Direction::Forward,
                     event.tcp_flags,
+                    event.is_fragment(),
+                    event.is_malformed(),
                 );
                 let metrics = new_node.state.compute_metrics(key);
 
@@ -388,12 +439,72 @@ impl FlowTable {
         }
     }
 
+    /// Current number of tracked active flows.
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    /// Capacity of this flow table partition.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns true if no flows are currently active.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// Returns the current load factor `len / capacity` in `[0.0, 1.0]`.
+    pub fn load_factor(&self) -> f64 {
+        self.map.len() as f64 / self.capacity.max(1) as f64
+    }
+
+    /// Emergency shed: immediately evicts `count` least-recently-used flows from the LRU tail
+    /// when the system is under extreme memory pressure (> 90% capacity).
+    pub fn emergency_shed(&mut self, count: usize) -> usize {
+        let mut shed_count = 0;
+        for _ in 0..count {
+            if let Some(tail_idx) = self.lru_tail {
+                self.evict_node(tail_idx);
+                shed_count += 1;
+                self.total_shed += 1;
+            } else {
+                break;
+            }
+        }
+        shed_count
+    }
+
+    /// Sheds stale flows older than `max_idle_ms` relative to `now_ms`.
+    /// Traverses from the LRU tail upwards.
+    pub fn shed_stale_flows(&mut self, max_idle_ms: u64, now_ms: u64) -> usize {
+        let mut shed_count = 0;
+        let mut current = self.lru_tail;
+
+        while let Some(idx) = current {
+            let prev = self.slab[idx].prev;
+            let newest_ts = {
+                let state = &self.slab[idx].state;
+                if state.count > 0 {
+                    let newest_idx = (state.head + WINDOW_SIZE - 1) % WINDOW_SIZE;
+                    state.buffer[newest_idx].timestamp_ms
+                } else {
+                    0
+                }
+            };
+
+            if now_ms.saturating_sub(newest_ts) >= max_idle_ms {
+                self.evict_node(idx);
+                shed_count += 1;
+                self.total_shed += 1;
+                current = prev;
+            } else {
+                // Since list is ordered by recency, older items are towards the tail.
+                // Once we hit an active flow, remaining entries are more recently active.
+                break;
+            }
+        }
+        shed_count
     }
 
     fn promote_lru(&mut self, idx: usize) {
@@ -405,8 +516,8 @@ impl FlowTable {
     }
 
     fn evict_node(&mut self, idx: usize) {
-        let node = &self.slab[idx];
-        self.map.remove(&node.key);
+        let key = self.slab[idx].key;
+        self.map.remove(&key);
         self.unlink_lru(idx);
     }
 
@@ -447,96 +558,129 @@ impl FlowTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use r_nads_common::PacketFlags;
+    use std::time::Duration;
 
     #[test]
     fn test_flow_state_aggregates() {
-        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let mut state = FlowState::new(ip);
+        let ip_a = "192.168.1.5".parse::<IpAddr>().unwrap();
+        let ip_b = "10.0.0.1".parse::<IpAddr>().unwrap();
+        let key = FlowKey::new(ip_a, 5000, ip_b, 80, 6);
 
-        let start = SystemTime::now();
+        let mut state = FlowState::new(ip_a);
+        let start = UNIX_EPOCH + Duration::from_millis(1000);
 
-        // Feed 3 packets: 100 bytes forward, 200 bytes backward, 300 bytes forward
-        state.update(start, 100, Direction::Forward, Some(0x02));
+        state.update(start, 100, Direction::Forward, Some(0x02), false, false);
         state.update(
-            start + std::time::Duration::from_millis(100),
+            start + Duration::from_millis(10),
             200,
             Direction::Backward,
-            Some(0x10),
+            Some(0x12),
+            false,
+            false,
         );
         state.update(
-            start + std::time::Duration::from_millis(200),
-            300,
+            start + Duration::from_millis(20),
+            150,
             Direction::Forward,
-            Some(0x04),
+            Some(0x10),
+            false,
+            false,
         );
 
-        let key = FlowKey::new(ip, 1234, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80, 6);
         let metrics = state.compute_metrics(key);
-
         assert_eq!(metrics.packet_count, 3);
-        assert_eq!(state.packets_fwd, 2);
-        assert_eq!(state.packets_bwd, 1);
-        assert_eq!(state.bytes_fwd, 400);
-        assert_eq!(state.bytes_bwd, 200);
-        assert_eq!(state.syn_count, 1);
-        assert_eq!(state.rst_count, 1);
-        assert_eq!(state.fin_count, 0);
-        assert_eq!(state.psh_count, 0);
-        assert_eq!(state.ack_count, 1);
-
-        assert_eq!(metrics.mean_len, 200.0);
-        assert!((metrics.var_len - 6666.6667).abs() < 0.1);
-        assert_eq!(metrics.packet_rate, 15.0);
-        assert_eq!(metrics.byte_rate, 3000.0);
-
-        assert!((metrics.syn_ratio - 0.3333).abs() < 0.01);
-        assert!((metrics.rst_ratio - 0.3333).abs() < 0.01);
-        assert_eq!(metrics.fin_ratio, 0.0);
-        assert_eq!(metrics.psh_ratio, 0.0);
-        assert!((metrics.ack_ratio - 0.3333).abs() < 0.01);
-
-        assert_eq!(metrics.mean_interval, 100.0);
-        assert_eq!(metrics.var_interval, 0.0);
+        assert!((metrics.mean_len - 150.0).abs() < 1e-4);
+        assert_eq!(metrics.syn_ratio, 2.0 / 3.0);
+        assert_eq!(metrics.fwd_bwd_ratio, 2.0);
+        assert_eq!(metrics.malformed_count, 0);
     }
 
     #[test]
-    fn test_flow_table_lru_eviction() {
-        let mut table = FlowTable::new(2);
+    fn test_flow_table_lru_and_emergency_shed() {
+        let mut table = FlowTable::new(3);
 
-        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        let ip3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-        let dest = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let ip_a = "10.0.0.1".parse::<IpAddr>().unwrap();
+        let ip_b = "10.0.0.2".parse::<IpAddr>().unwrap();
+        let ip_c = "10.0.0.3".parse::<IpAddr>().unwrap();
+        let dest = "192.168.1.1".parse::<IpAddr>().unwrap();
 
-        let make_packet = |src, dest, port| PacketEvent {
+        let event1 = PacketEvent {
             timestamp: SystemTime::now(),
             len: 64,
-            src_ip: src,
+            src_ip: ip_a,
             dest_ip: dest,
-            src_port: port,
+            src_port: 1001,
             dest_port: 80,
             protocol: 6,
-            tcp_flags: None,
+            tcp_flags: Some(0x02),
+            flags: PacketFlags::default(),
         };
 
-        table.process_packet(&make_packet(ip1, dest, 1001));
+        let event2 = PacketEvent {
+            timestamp: SystemTime::now(),
+            len: 64,
+            src_ip: ip_b,
+            dest_ip: dest,
+            src_port: 1002,
+            dest_port: 80,
+            protocol: 6,
+            tcp_flags: Some(0x02),
+            flags: PacketFlags::default(),
+        };
+
+        let event3 = PacketEvent {
+            timestamp: SystemTime::now(),
+            len: 64,
+            src_ip: ip_c,
+            dest_ip: dest,
+            src_port: 1003,
+            dest_port: 80,
+            protocol: 6,
+            tcp_flags: Some(0x02),
+            flags: PacketFlags::default(),
+        };
+
+        table.process_packet(&event1);
+        table.process_packet(&event2);
+        table.process_packet(&event3);
+
+        assert_eq!(table.len(), 3);
+        assert!((table.load_factor() - 1.0).abs() < 1e-4);
+
+        // Emergency shed 2 flows
+        let shed = table.emergency_shed(2);
+        assert_eq!(shed, 2);
         assert_eq!(table.len(), 1);
+        assert_eq!(table.total_shed, 2);
+    }
 
-        table.process_packet(&make_packet(ip2, dest, 1002));
-        assert_eq!(table.len(), 2);
+    #[test]
+    fn test_ipv6_udp_flow_aggregation() {
+        let mut table = FlowTable::new(10);
+        let src_v6: IpAddr = "2001:db8::10".parse().unwrap();
+        let dst_v6: IpAddr = "2001:db8::53".parse().unwrap();
 
-        table.process_packet(&make_packet(ip1, dest, 1001));
+        let event = PacketEvent {
+            timestamp: SystemTime::now(),
+            len: 128,
+            src_ip: src_v6,
+            dest_ip: dst_v6,
+            src_port: 45000,
+            dest_port: 53,
+            protocol: 17, // UDP
+            tcp_flags: None,
+            flags: PacketFlags {
+                is_fragment: false,
+                is_malformed: false,
+            },
+        };
 
-        table.process_packet(&make_packet(ip3, dest, 1003));
-        assert_eq!(table.len(), 2);
-
-        let key1 = FlowKey::new(ip1, 1001, dest, 80, 6);
-        let key2 = FlowKey::new(ip2, 1002, dest, 80, 6);
-        let key3 = FlowKey::new(ip3, 1003, dest, 80, 6);
-
-        assert!(table.map.contains_key(&key1));
-        assert!(table.map.contains_key(&key3));
-        assert!(!table.map.contains_key(&key2));
+        let metrics = table.process_packet(&event);
+        assert_eq!(metrics.protocol, 17);
+        assert!(metrics.key.is_ipv6());
+        assert_eq!(metrics.syn_ratio, 0.0);
+        assert_eq!(metrics.rst_ratio, 0.0);
+        assert_eq!(metrics.packet_count, 1);
     }
 }

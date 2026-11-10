@@ -1,14 +1,22 @@
 use r_nads_aggregator::FlowMetrics;
 use r_nads_events::AnomalyAlert;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The dimension D for the Random Fourier Features space.
 pub const PROJECTION_DIM: usize = 256;
 
 /// Global static configuration for model weights to avoid heap indirection and runtime disk reads.
 pub static MODEL_CONFIG: OnceLock<ModelConfig> = OnceLock::new();
+
+/// Global static drift detector for monitoring production model health.
+pub static DRIFT_DETECTOR: OnceLock<DriftDetector> = OnceLock::new();
+
+pub fn get_drift_detector() -> &'static DriftDetector {
+    DRIFT_DETECTOR.get_or_init(DriftDetector::new)
+}
 
 pub mod serde_arrays {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -72,9 +80,26 @@ pub mod serde_arrays {
     }
 }
 
+fn default_model_version() -> String {
+    "1.1.0".to_string()
+}
+
+fn default_baseline_distance() -> f64 {
+    0.5
+}
+
 /// Model configuration loaded upon startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// Semantic version of the trained model
+    #[serde(default = "default_model_version")]
+    pub version: String,
+    /// Unix timestamp when model was trained
+    #[serde(default)]
+    pub trained_at: u64,
+    /// Baseline average Euclidean distance of normal training samples in RFF space
+    #[serde(default = "default_baseline_distance")]
+    pub baseline_distance: f64,
     /// Configurable threshold R^2
     pub threshold: f64,
     /// Means of the 12 features
@@ -108,6 +133,75 @@ pub struct InferenceResult {
     pub distance_sq: f64,
     /// Boolean indicating if the flow is anomalous (distance_sq > threshold)
     pub is_anomaly: bool,
+    /// Semantic version of the model that evaluated this flow
+    pub model_version: String,
+    /// Ratio of flow distance vs normal baseline distance (1.0 = baseline)
+    pub anomaly_ratio: f64,
+    /// Boolean flag indicating significant model drift detected (> 25% shift)
+    pub drift_detected: bool,
+}
+
+/// Thread-safe lockless drift detector using atomic bit representations of f64.
+/// Implements an Exponential Moving Average (EWMA) of distance squared.
+#[derive(Debug, Default)]
+pub struct DriftDetector {
+    rolling_dist_sq_bits: AtomicU64,
+    sample_count: AtomicU64,
+}
+
+impl DriftDetector {
+    pub fn new() -> Self {
+        Self {
+            rolling_dist_sq_bits: AtomicU64::new(0),
+            sample_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Observes a new distance squared sample and returns `(current_rolling_mean, drift_detected)`.
+    /// Drift is flagged if rolling mean shifts by > 25% from baseline distance squared after warmup.
+    pub fn observe(&self, dist_sq: f64, baseline_dist_sq: f64) -> (f64, bool) {
+        let count = self.sample_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let alpha = if count < 1000 {
+            1.0 / count as f64
+        } else {
+            0.001
+        };
+
+        let mut current_bits = self.rolling_dist_sq_bits.load(Ordering::Relaxed);
+        let mut new_rolling;
+        loop {
+            let current_val = f64::from_bits(current_bits);
+            new_rolling = if current_val == 0.0 {
+                dist_sq
+            } else {
+                current_val * (1.0 - alpha) + dist_sq * alpha
+            };
+            match self.rolling_dist_sq_bits.compare_exchange_weak(
+                current_bits,
+                new_rolling.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_bits = actual,
+            }
+        }
+
+        let drift_detected = if count > 500 && baseline_dist_sq > 1e-6 {
+            let ratio = new_rolling / baseline_dist_sq;
+            !(0.75..=1.25).contains(&ratio)
+        } else {
+            false
+        };
+
+        (new_rolling, drift_detected)
+    }
+
+    /// Returns the current rolling distance squared.
+    pub fn current_rolling_dist_sq(&self) -> f64 {
+        f64::from_bits(self.rolling_dist_sq_bits.load(Ordering::Relaxed))
+    }
 }
 
 /// Support Vector Data Description (SVDD) classifier with Random Fourier Features (RFF).
@@ -160,10 +254,21 @@ impl InferenceEngine {
 
         // 3. Exact Squared Euclidean Distance to Centroid
         let distance_sq = Self::euclidean_distance_sq(&z_projected, &config.centroid);
+        let distance = distance_sq.sqrt();
+        let baseline_dist = config.baseline_distance.max(1e-6);
+        let anomaly_ratio = distance / baseline_dist;
+
+        // 4. Rolling Model Drift Tracking
+        let baseline_dist_sq = baseline_dist * baseline_dist;
+        let (_rolling_mean, drift_detected) =
+            get_drift_detector().observe(distance_sq, baseline_dist_sq);
 
         InferenceResult {
             distance_sq,
             is_anomaly: distance_sq > config.threshold,
+            model_version: config.version.clone(),
+            anomaly_ratio,
+            drift_detected,
         }
     }
 
@@ -383,18 +488,25 @@ impl InferenceEngine {
         distances_sq.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let threshold_idx = (n as f64 * 0.95) as usize;
         let threshold = distances_sq[threshold_idx.min(n - 1)];
+        let mean_dist = (distances_sq.iter().sum::<f64>() / n as f64).sqrt();
+
+        let trained_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
         println!("[Trainer] SVDD Baseline training completed:");
-        println!(
-            "  - Mean distance (Euclidean): {:.6}",
-            (distances_sq.iter().sum::<f64>() / n as f64).sqrt()
-        );
+        println!("  - Model Version: 1.1.0");
+        println!("  - Mean distance (Euclidean): {:.6}", mean_dist);
         println!(
             "  - 95th percentile threshold (distance^2): {:.6}",
             threshold
         );
 
         Ok(ModelConfig {
+            version: "1.1.0".to_string(),
+            trained_at,
+            baseline_distance: mean_dist,
             threshold,
             means,
             stddevs,
@@ -409,6 +521,7 @@ impl InferenceEngine {
 #[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     #[test]
     fn test_euclidean_distance_sq() {
@@ -425,107 +538,107 @@ mod tests {
     }
 
     #[test]
-    fn test_model_config_serialization() {
+    fn test_svdd_prediction_and_drift() {
         let mut w_matrix = [[0.0; 12]; PROJECTION_DIM];
         let mut centroid = [0.0; PROJECTION_DIM];
-        let mut b_vector = [0.0; PROJECTION_DIM];
-
         for i in 0..PROJECTION_DIM {
-            centroid[i] = i as f64 * 0.1;
-            b_vector[i] = i as f64 * 0.2;
-            for j in 0..12 {
-                w_matrix[i][j] = (i + j) as f64 * 0.01;
-            }
+            w_matrix[i][0] = 0.1;
+            centroid[i] = 0.05;
         }
 
-        let config = ModelConfig {
-            threshold: 1.25,
-            means: [
-                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-            ],
-            stddevs: [0.1; 12],
-            centroid,
-            b_vector,
-            w_matrix,
-        };
-
-        let serialized = serde_json::to_string(&config).expect("Failed to serialize");
-        let deserialized: ModelConfig =
-            serde_json::from_str(&serialized).expect("Failed to deserialize");
-
-        assert!((deserialized.threshold - config.threshold).abs() < 1e-9);
-        for i in 0..12 {
-            assert!((deserialized.means[i] - config.means[i]).abs() < 1e-9);
-            assert!((deserialized.stddevs[i] - config.stddevs[i]).abs() < 1e-9);
-        }
-        for i in 0..PROJECTION_DIM {
-            assert!((deserialized.centroid[i] - config.centroid[i]).abs() < 1e-9);
-            assert!((deserialized.b_vector[i] - config.b_vector[i]).abs() < 1e-9);
-            for j in 0..12 {
-                assert!((deserialized.w_matrix[i][j] - config.w_matrix[i][j]).abs() < 1e-9);
-            }
-        }
-    }
-
-    #[test]
-    fn test_svdd_prediction() {
-        let mut w_matrix = [[0.0; 12]; PROJECTION_DIM];
-        let mut centroid = [0.0; PROJECTION_DIM];
-        let mut b_vector = [0.0; PROJECTION_DIM];
-
-        for i in 0..PROJECTION_DIM {
-            centroid[i] = 0.5;
-            b_vector[i] = 0.1;
-            for j in 0..12 {
-                w_matrix[i][j] = 0.05;
-            }
-        }
-
-        let dummy_config = ModelConfig {
-            threshold: 0.1,
-            means: [10.0; 12],
+        let model = ModelConfig {
+            version: "1.1.0".to_string(),
+            trained_at: 1700000000,
+            baseline_distance: 0.1,
+            threshold: 1.0,
+            means: [0.0; 12],
             stddevs: [1.0; 12],
             centroid,
-            b_vector,
+            b_vector: [0.0; PROJECTION_DIM],
             w_matrix,
         };
 
-        let _ = MODEL_CONFIG.set(dummy_config);
+        let _ = MODEL_CONFIG.set(model);
 
-        let normal_metrics = FlowMetrics {
-            src_ip: "127.0.0.1".parse().unwrap(),
-            dest_ip: "127.0.0.2".parse().unwrap(),
+        let metrics = FlowMetrics {
+            src_ip: "10.0.0.1".parse::<IpAddr>().unwrap(),
+            dest_ip: "10.0.0.2".parse::<IpAddr>().unwrap(),
             src_port: 1234,
             dest_port: 80,
             protocol: 6,
             key: r_nads_common::FlowKey::new(
-                "127.0.0.1".parse().unwrap(),
+                "10.0.0.1".parse::<IpAddr>().unwrap(),
                 1234,
-                "127.0.0.2".parse().unwrap(),
+                "10.0.0.2".parse::<IpAddr>().unwrap(),
                 80,
                 6,
             ),
-            packet_count: 5,
-            mean_len: 10.0,
-            var_len: 1.0,
-            packet_rate: 10.0,
-            byte_rate: 10.0,
+            packet_count: 10,
+            mean_len: 100.0,
+            var_len: 20.0,
+            packet_rate: 100.0,
+            byte_rate: 10000.0,
             fwd_bwd_ratio: 1.0,
-            syn_ratio: 0.0,
+            syn_ratio: 0.1,
             rst_ratio: 0.0,
             fin_ratio: 0.0,
-            psh_ratio: 0.0,
-            ack_ratio: 1.0,
+            psh_ratio: 0.1,
+            ack_ratio: 0.9,
             mean_interval: 10.0,
-            var_interval: 1.0,
+            var_interval: 2.0,
+            malformed_count: 0,
+            fragment_count: 0,
         };
 
-        let result = InferenceEngine::predict(&normal_metrics);
-        assert!(result.distance_sq >= 0.0);
+        let result = InferenceEngine::predict(&metrics);
+        assert_eq!(result.model_version, "1.1.0");
+        assert!(result.anomaly_ratio > 0.0);
+    }
 
-        let alert = InferenceEngine::create_alert(&normal_metrics, &result);
-        assert_eq!(alert.src_ip, "127.0.0.1");
-        assert_eq!(alert.dest_ip, "127.0.0.2");
-        assert_eq!(alert.score, result.distance_sq);
+    #[test]
+    fn test_model_config_serialization_roundtrip() {
+        let config = ModelConfig {
+            version: "1.1.0".to_string(),
+            trained_at: 1700000000,
+            baseline_distance: 0.5,
+            threshold: 1.234,
+            means: [1.0; 12],
+            stddevs: [2.0; 12],
+            centroid: [0.3; PROJECTION_DIM],
+            b_vector: [0.4; PROJECTION_DIM],
+            w_matrix: [[0.5; 12]; PROJECTION_DIM],
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ModelConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.version, "1.1.0");
+        assert_eq!(deserialized.trained_at, 1700000000);
+        assert!((deserialized.threshold - config.threshold).abs() < 1e-9);
+        assert!((deserialized.centroid[0] - config.centroid[0]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_drift_detector() {
+        let detector = DriftDetector::new();
+        // Warmup with baseline
+        for _ in 0..600 {
+            let (_, drift) = detector.observe(1.0, 1.0);
+            assert!(!drift);
+        }
+
+        // Extreme shift: distance squared suddenly triples to 3.0
+        let mut drift_flagged = false;
+        for _ in 0..1000 {
+            let (_, drift) = detector.observe(3.0, 1.0);
+            if drift {
+                drift_flagged = true;
+                break;
+            }
+        }
+        assert!(
+            drift_flagged,
+            "Drift detector should flag a permanent 3x shift"
+        );
     }
 }

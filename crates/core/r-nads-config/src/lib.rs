@@ -101,4 +101,3 @@ pub fn spawn_config_watcher(
         })
         .expect("Failed to spawn config watcher thread")
 }
-

@@ -35,7 +35,7 @@ struct Args {
 #[allow(clippy::manual_is_multiple_of)]
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
-    println!("=== R-NADS Pro: Production Security Agent Daemon ===");
+    println!("=== R-NADS Pro: Production Security Agent Daemon (v1.1) ===");
 
     // 1. Load and parse config.toml
     let mut app_config = AppConfig::load_from_file(&args.config)?;
@@ -67,9 +67,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let watcher_thread =
         spawn_config_watcher(args.config.clone(), shared_config.clone(), running.clone());
 
-    // Performance counters
+    // Performance and health counters
     let packet_counter = Arc::new(AtomicU64::new(0));
     let latency_sum_us = Arc::new(AtomicU64::new(0));
+    let backpressure_drop_counter = Arc::new(AtomicU64::new(0));
+    let malformed_packet_counter = Arc::new(AtomicU64::new(0));
+    let fragmented_packet_counter = Arc::new(AtomicU64::new(0));
 
     // Create worker channels
     let mut worker_txs = Vec::new();
@@ -97,14 +100,21 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                 while running_flag.load(Ordering::SeqCst) {
                     if let Ok(event) = rx.recv_timeout(Duration::from_millis(50)) {
+                        // Automated memory shedding under memory pressure (>90% full)
+                        if flow_table.load_factor() >= 0.90 {
+                            flow_table.emergency_shed(50);
+                        }
+
                         let metrics = flow_table.process_packet(&event);
                         let _ = inf_tx.send(metrics);
                     }
                 }
                 println!(
-                    "[Aggregator-{}] Thread exiting. Active flows: {}",
+                    "[Aggregator-{}] Thread exiting. Active flows: {}, Total evictions: {}, Total shed: {}",
                     i,
-                    flow_table.len()
+                    flow_table.len(),
+                    flow_table.total_evictions,
+                    flow_table.total_shed
                 );
             })?;
 
@@ -128,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let result = match capture_source.as_str() {
                 "mock" => {
                     println!(
-                        "[Producer] Generating Synthetic Traffic: {} PPS, {} active flows",
+                        "[Producer] Generating Synthetic Traffic (IPv4/IPv6/TCP/UDP/ICMP): {} PPS, {} active flows",
                         pps, flows
                     );
                     run_mock_capture(producer_tx, pps, flows, running_flag.clone())
@@ -165,21 +175,32 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             println!("[Producer] Thread exiting.");
         })?;
 
-    // Spawn Router Thread
+    // Spawn Router Thread with Backpressure Shedding
     let rx_c = producer_rx;
     let tx_channels = worker_txs;
     let num_workers = app_config.system.workers;
     let running_flag = running.clone();
     let pkt_count = packet_counter.clone();
     let lat_sum = latency_sum_us.clone();
+    let drop_count = backpressure_drop_counter.clone();
+    let malformed_count = malformed_packet_counter.clone();
+    let frag_count = fragmented_packet_counter.clone();
 
     let router_thread = thread::Builder::new()
         .name("router".to_string())
         .spawn(move || {
-            println!("[Router] Routing thread started.");
+            println!("[Router] Routing thread started with backpressure protection.");
             while running_flag.load(Ordering::SeqCst) {
                 if let Ok(event) = rx_c.recv_timeout(Duration::from_millis(50)) {
                     let start_route = Instant::now();
+
+                    // Track packet protocol diagnostics
+                    if event.is_malformed() {
+                        malformed_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if event.is_fragment() {
+                        frag_count.fetch_add(1, Ordering::Relaxed);
+                    }
 
                     let key = event.flow_key();
                     let mut hasher = AHasher::default();
@@ -187,7 +208,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let hash = hasher.finish();
                     let worker_idx = (hash % num_workers as u64) as usize;
 
-                    if tx_channels[worker_idx].send(event).is_ok() {
+                    // Backpressure check: if worker queue is at >= 90% capacity (18,000 of 20,000)
+                    if tx_channels[worker_idx].len() >= 18000 {
+                        drop_count.fetch_add(1, Ordering::Relaxed);
+                    } else if tx_channels[worker_idx].send(event).is_ok() {
                         pkt_count.fetch_add(1, Ordering::Relaxed);
                         let elapsed_us = start_route.elapsed().as_micros() as u64;
                         lat_sum.fetch_add(elapsed_us, Ordering::Relaxed);
@@ -207,8 +231,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(json_content) => match serde_json::from_str::<ModelConfig>(&json_content) {
                 Ok(model_cfg) => {
                     println!(
-                        "[Inference] Loaded pretrained Model Config from '{}'.",
-                        model_path
+                        "[Inference] Loaded pretrained Model Config (v{}) from '{}'.",
+                        model_cfg.version, model_path
                     );
                     loaded_model = Some(model_cfg);
                 }
@@ -239,6 +263,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             running.clone(),
             packet_counter,
             latency_sum_us,
+            backpressure_drop_counter,
+            malformed_packet_counter,
+            fragmented_packet_counter,
         )?;
     } else {
         println!(
@@ -277,8 +304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let json_string = serde_json::to_string_pretty(&trained_model)?;
             std::fs::write(&model_path, json_string)?;
             println!(
-                "[Trainer] Model parameters written back to '{}'.",
-                model_path
+                "[Trainer] Model parameters (v{}) written back to '{}'.",
+                trained_model.version, model_path
             );
 
             MODEL_CONFIG
@@ -292,6 +319,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 running.clone(),
                 packet_counter,
                 latency_sum_us,
+                backpressure_drop_counter,
+                malformed_packet_counter,
+                fragmented_packet_counter,
             )?;
         } else {
             println!("[Trainer] Training aborted due to early shutdown.");
@@ -315,13 +345,16 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 /// Spawns the classification sub-pipeline threads (Inference, Mitigation HTTP, DB Logger, Health Monitor)
-#[allow(clippy::manual_is_multiple_of)]
+#[allow(clippy::manual_is_multiple_of, clippy::too_many_arguments)]
 fn start_classification_pipeline(
     config: Arc<std::sync::RwLock<SystemConfig>>,
     inference_rx: crossbeam_channel::Receiver<FlowMetrics>,
     running: Arc<AtomicBool>,
     packet_counter: Arc<AtomicU64>,
     latency_sum_us: Arc<AtomicU64>,
+    backpressure_drop_counter: Arc<AtomicU64>,
+    malformed_packet_counter: Arc<AtomicU64>,
+    fragmented_packet_counter: Arc<AtomicU64>,
 ) -> Result<Vec<thread::JoinHandle<()>>, Box<dyn std::error::Error + Send + Sync>> {
     let (bind_addr, db_path, log_path) = {
         let cfg = config.read().unwrap();
@@ -466,7 +499,7 @@ fn start_classification_pipeline(
         })?;
     threads.push(database_thread);
 
-    // 3. Spawn Inference Engine thread
+    // 3. Spawn Inference Engine thread with Model Drift Reporting
     let running_flag = running.clone();
     let blocklist_inference = blocklist.clone();
     let alert_tx_c = alert_tx;
@@ -482,6 +515,13 @@ fn start_classification_pipeline(
                     total_inferences += 1;
                     let res = InferenceEngine::predict(&metrics);
                     let client_ip = metrics.src_ip;
+
+                    if res.drift_detected && total_inferences % 5000 == 0 {
+                        eprintln!(
+                            "[Model Drift] Warning: Permanent shift detected in flow distribution! Anomaly ratio: {:.2}",
+                            res.anomaly_ratio
+                        );
+                    }
 
                     if res.is_anomaly {
                         let alert = InferenceEngine::create_alert(&metrics, &res);
@@ -517,6 +557,9 @@ fn start_classification_pipeline(
     let running_flag = running;
     let pkt_count = packet_counter;
     let lat_sum = latency_sum_us;
+    let drops = backpressure_drop_counter;
+    let malformed = malformed_packet_counter;
+    let frags = fragmented_packet_counter;
     let blocklist_monitor = blocklist;
     let alert_rx_monitor = alert_rx;
 
@@ -544,6 +587,9 @@ fn start_classification_pipeline(
                 if now.duration_since(last_time).as_secs() >= 2 {
                     let elapsed_sec = now.duration_since(last_time).as_secs_f64();
                     let current_packets = pkt_count.load(Ordering::Relaxed);
+                    let current_drops = drops.load(Ordering::Relaxed);
+                    let current_malformed = malformed.load(Ordering::Relaxed);
+                    let current_frags = frags.load(Ordering::Relaxed);
                     let packets_diff = current_packets - last_packets;
                     let throughput = packets_diff as f64 / elapsed_sec;
 
@@ -555,8 +601,8 @@ fn start_classification_pipeline(
                     };
 
                     println!(
-                        "[Monitor] Health: Throughput = {:.1} pps, Avg Routing Latency = {:.3} us, Blocked IPs = {}, Total Packets = {}",
-                        throughput, avg_latency, blocklist_monitor.len(), current_packets
+                        "[Monitor] Health: Throughput = {:.1} pps | Avg Latency = {:.3} us | Backpressure Drops = {} | Malformed Pkts = {} | Frag Pkts = {} | Blocked IPs = {} | Total Pkts = {}",
+                        throughput, avg_latency, current_drops, current_malformed, current_frags, blocklist_monitor.len(), current_packets
                     );
 
                     last_time = now;
@@ -569,4 +615,3 @@ fn start_classification_pipeline(
 
     Ok(threads)
 }
-
