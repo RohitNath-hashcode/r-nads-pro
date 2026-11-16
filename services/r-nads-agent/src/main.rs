@@ -22,6 +22,13 @@ use r_nads_nginx::run_mitigation_server_with_ratelimit;
 use r_nads_producer::{run_live_capture, run_mock_capture, run_pcap_file_capture};
 use r_nads_ratelimit::{MultiDimensionalRateLimiter, RateLimiterConfig};
 
+/// Asynchronous firewall mitigation command
+#[derive(Debug, Clone)]
+enum FirewallCommand {
+    Apply(r_nads_decision::MitigationAction),
+    Remove(String),
+}
+
 /// R-NADS Agent CLI Arguments
 #[derive(Parser, Debug)]
 #[command(name = "r-nads-agent")]
@@ -395,9 +402,37 @@ fn start_classification_pipeline(
         }
     };
 
-    // Channels for alerts
+    // Channels for alerts & async kernel mitigation commands
     let (alert_tx, alert_rx) = unbounded::<AnomalyAlert>();
+    let (mitigation_cmd_tx, mitigation_cmd_rx) = bounded::<FirewallCommand>(4096);
     let mut threads = Vec::new();
+
+    // 0. Spawn Asynchronous Kernel Firewall Mitigation Actor Thread
+    let running_fw = running.clone();
+    let fw_provider = firewall_provider.clone();
+    let firewall_actor_thread = thread::Builder::new()
+        .name("firewall-actor".to_string())
+        .spawn(move || {
+            println!("[FirewallActor] Asynchronous mitigation execution worker started.");
+            while running_fw.load(Ordering::SeqCst) {
+                if let Ok(cmd) = mitigation_cmd_rx.recv_timeout(Duration::from_millis(50)) {
+                    match cmd {
+                        FirewallCommand::Apply(action) => {
+                            if let Err(e) = fw_provider.apply(&action) {
+                                eprintln!("[FirewallActor] Failed to apply rule: {}", e);
+                            }
+                        }
+                        FirewallCommand::Remove(action_id) => {
+                            if let Err(e) = fw_provider.remove(&action_id) {
+                                eprintln!("[FirewallActor] Failed to remove rule: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            println!("[FirewallActor] Thread exiting.");
+        })?;
+    threads.push(firewall_actor_thread);
 
     // 1. Spawn Mitigation server thread
     let blocklist_mitigation = blocklist.clone();
@@ -533,7 +568,7 @@ fn start_classification_pipeline(
     let running_flag = running.clone();
     let blocklist_inference = blocklist.clone();
     let alert_tx_c = alert_tx;
-    let firewall_mitigation = firewall_provider.clone();
+    let cmd_tx = mitigation_cmd_tx;
 
     let inference_thread = thread::Builder::new()
         .name("inference".to_string())
@@ -560,16 +595,14 @@ fn start_classification_pipeline(
                         // Track anomalous IPs in the blocklist map
                         blocklist_inference.insert(client_ip, Instant::now());
 
-                        // Apply kernel firewall mitigation
+                        // Dispatch non-blocking asynchronous kernel mitigation command
                         let action = r_nads_decision::MitigationAction {
                             action_id: format!("ban_{}", client_ip),
                             target_ip: client_ip,
                             duration_secs: 300,
                             reason: format!("SVDD anomaly score: {:.4}", res.anomaly_ratio),
                         };
-                        if let Err(e) = firewall_mitigation.apply(&action) {
-                            eprintln!("[Firewall] Failed to apply kernel mitigation: {}", e);
-                        }
+                        let _ = cmd_tx.try_send(FirewallCommand::Apply(action));
 
                         let _ = alert_tx_c.send(alert);
                     } else {
@@ -577,7 +610,7 @@ fn start_classification_pipeline(
                         if blocklist_inference.contains_key(&client_ip) {
                             blocklist_inference.remove(&client_ip);
                             let action_id = format!("ban_{}", client_ip);
-                            let _ = firewall_mitigation.remove(&action_id);
+                            let _ = cmd_tx.try_send(FirewallCommand::Remove(action_id));
                             println!(
                                 "[Mitigation] IP {} returned to normal SVDD bounds. Active behavioral unblock triggered.",
                                 client_ip

@@ -28,6 +28,7 @@ fn bench_multidimensional_lookup(c: &mut Criterion) {
         subnet_window_duration_ms: 60_000,
         route_burst_capacity: 100_000,
         route_refill_per_sec: 100_000.0,
+        max_tracked_entries: 500_000,
     };
     let limiter = Arc::new(MultiDimensionalRateLimiter::new(&config, time_source));
     let ip: IpAddr = "192.168.1.100".parse().unwrap();

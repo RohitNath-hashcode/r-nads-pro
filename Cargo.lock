@@ -871,6 +871,8 @@ dependencies = [
 name = "r-nads-firewall"
 version = "0.1.0"
 dependencies = [
+ "ahash",
+ "dashmap",
  "r-nads-common",
  "r-nads-decision",
  "serde",

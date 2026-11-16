@@ -109,18 +109,51 @@ struct TokenBucketState {
 pub struct TokenBucketLimiter {
     capacity: f64,
     refill_rate_per_sec: f64,
+    max_entries: usize,
     buckets: DashMap<RateLimitKey, TokenBucketState, RandomState>,
     time_source: Arc<dyn TimeSource>,
 }
 
 impl TokenBucketLimiter {
+    pub const DEFAULT_MAX_ENTRIES: usize = 200_000;
+
     pub fn new(capacity: u64, refill_rate_per_sec: f64, time_source: Arc<dyn TimeSource>) -> Self {
+        Self::with_max_entries(
+            capacity,
+            refill_rate_per_sec,
+            Self::DEFAULT_MAX_ENTRIES,
+            time_source,
+        )
+    }
+
+    pub fn with_max_entries(
+        capacity: u64,
+        refill_rate_per_sec: f64,
+        max_entries: usize,
+        time_source: Arc<dyn TimeSource>,
+    ) -> Self {
         Self {
             capacity: capacity as f64,
             refill_rate_per_sec,
+            max_entries: max_entries.max(100),
             buckets: DashMap::with_hasher(RandomState::new()),
             time_source,
         }
+    }
+
+    /// Prune stale entries that have fully replenished and been inactive for at least `max_age_ms`.
+    pub fn cleanup_stale(&self, max_age_ms: u64) -> usize {
+        let now_ms = self.time_source.current_timestamp_millis();
+        let mut pruned = 0;
+        self.buckets.retain(|_, state| {
+            let age = now_ms.saturating_sub(state.last_update_ms);
+            let keep = !(age >= max_age_ms && state.tokens >= (self.capacity - 0.001));
+            if !keep {
+                pruned += 1;
+            }
+            keep
+        });
+        pruned
     }
 
     /// Check and consume 1 token for the specified key.
@@ -128,6 +161,13 @@ impl TokenBucketLimiter {
     #[inline]
     pub fn check_and_consume(&self, key: &RateLimitKey) -> RateLimitDecision {
         let now_ms = self.time_source.current_timestamp_millis();
+
+        // Guard against memory exhaustion: emergency prune if capacity exceeded
+        if self.buckets.len() >= self.max_entries {
+            // Evict entries inactive for more than 60 seconds
+            self.cleanup_stale(60_000);
+        }
+
         let mut entry = self
             .buckets
             .entry(key.clone())
@@ -197,22 +237,55 @@ struct SlidingWindowState {
 pub struct SlidingWindowLimiter {
     max_requests: u64,
     window_duration_ms: u64,
+    max_entries: usize,
     windows: DashMap<RateLimitKey, SlidingWindowState, RandomState>,
     time_source: Arc<dyn TimeSource>,
 }
 
 impl SlidingWindowLimiter {
+    pub const DEFAULT_MAX_ENTRIES: usize = 200_000;
+
     pub fn new(
         max_requests: u64,
         window_duration_ms: u64,
         time_source: Arc<dyn TimeSource>,
     ) -> Self {
+        Self::with_max_entries(
+            max_requests,
+            window_duration_ms,
+            Self::DEFAULT_MAX_ENTRIES,
+            time_source,
+        )
+    }
+
+    pub fn with_max_entries(
+        max_requests: u64,
+        window_duration_ms: u64,
+        max_entries: usize,
+        time_source: Arc<dyn TimeSource>,
+    ) -> Self {
         Self {
             max_requests,
             window_duration_ms: window_duration_ms.max(1),
+            max_entries: max_entries.max(100),
             windows: DashMap::with_hasher(RandomState::new()),
             time_source,
         }
+    }
+
+    /// Prune stale windows older than 2 window durations.
+    pub fn cleanup_stale(&self) -> usize {
+        let now_ms = self.time_source.current_timestamp_millis();
+        let cutoff = now_ms.saturating_sub(self.window_duration_ms * 2);
+        let mut pruned = 0;
+        self.windows.retain(|_, state| {
+            let keep = state.current.window_start_ms >= cutoff;
+            if !keep {
+                pruned += 1;
+            }
+            keep
+        });
+        pruned
     }
 
     /// Check and increment the sliding window counter.
@@ -220,6 +293,11 @@ impl SlidingWindowLimiter {
     pub fn check_and_increment(&self, key: &RateLimitKey) -> RateLimitDecision {
         let now_ms = self.time_source.current_timestamp_millis();
         let current_window_start = now_ms - (now_ms % self.window_duration_ms);
+
+        // Guard against memory exhaustion: emergency prune if capacity exceeded
+        if self.windows.len() >= self.max_entries {
+            self.cleanup_stale();
+        }
 
         let mut entry = self
             .windows
@@ -349,6 +427,7 @@ pub struct RateLimiterConfig {
     pub subnet_window_duration_ms: u64,
     pub route_burst_capacity: u64,
     pub route_refill_per_sec: f64,
+    pub max_tracked_entries: usize,
 }
 
 impl Default for RateLimiterConfig {
@@ -360,6 +439,7 @@ impl Default for RateLimiterConfig {
             subnet_window_duration_ms: 60_000,
             route_burst_capacity: 50,
             route_refill_per_sec: 10.0,
+            max_tracked_entries: 200_000,
         }
     }
 }
@@ -375,22 +455,33 @@ pub struct MultiDimensionalRateLimiter {
 impl MultiDimensionalRateLimiter {
     pub fn new(config: &RateLimiterConfig, time_source: Arc<dyn TimeSource>) -> Self {
         Self {
-            ip_limiter: TokenBucketLimiter::new(
+            ip_limiter: TokenBucketLimiter::with_max_entries(
                 config.ip_burst_capacity,
                 config.ip_refill_per_sec,
+                config.max_tracked_entries,
                 time_source.clone(),
             ),
-            subnet_limiter: SlidingWindowLimiter::new(
+            subnet_limiter: SlidingWindowLimiter::with_max_entries(
                 config.subnet_window_requests,
                 config.subnet_window_duration_ms,
+                config.max_tracked_entries,
                 time_source.clone(),
             ),
-            route_limiter: TokenBucketLimiter::new(
+            route_limiter: TokenBucketLimiter::with_max_entries(
                 config.route_burst_capacity,
                 config.route_refill_per_sec,
+                config.max_tracked_entries,
                 time_source,
             ),
         }
+    }
+
+    /// Explicitly trigger a garbage collection sweep across all rate-limiting dimensions.
+    pub fn cleanup_stale_entries(&self) -> (usize, usize, usize) {
+        let ip_pruned = self.ip_limiter.cleanup_stale(60_000);
+        let subnet_pruned = self.subnet_limiter.cleanup_stale();
+        let route_pruned = self.route_limiter.cleanup_stale(60_000);
+        (ip_pruned, subnet_pruned, route_pruned)
     }
 
     /// Evaluates all rate-limiting dimensions in priority order:
@@ -474,8 +565,7 @@ mod tests {
         assert!(limiter.check_and_increment(&key).is_allowed());
         assert!(limiter.check_and_increment(&key).is_limited());
 
-        // Move into next window far enough so weighted count of previous window drops
-        // Or advance by full 2 windows (20,000ms) where previous window is completely expired
+        // Move across full 2 windows (20,000ms) where previous window is completely expired
         mock_time.advance_millis(20_000);
         assert!(limiter.check_and_increment(&key).is_allowed());
     }

@@ -1,14 +1,15 @@
 #![forbid(unsafe_code)]
 
+use ahash::RandomState;
+use dashmap::DashMap;
 use r_nads_common::canonicalize_ip;
 use r_nads_decision::{
     MitigationAction, MitigationError, MitigationProvider, MitigationResult, ProviderHealth,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::process::Command;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // 1. Safety Whitelist Engine (Protects CDNs, internal subnets, and gateways)
@@ -171,10 +172,11 @@ pub struct ActiveBan {
 pub struct KernelMitigationProvider {
     mode: FirewallMode,
     whitelist: SafetyWhitelist,
-    active_bans: Arc<RwLock<HashMap<String, ActiveBan>>>,
+    active_bans: Arc<DashMap<String, ActiveBan, RandomState>>,
     table_family: String,
     table_name: String,
-    set_name: String,
+    set_name_v4: String,
+    set_name_v6: String,
 }
 
 impl KernelMitigationProvider {
@@ -182,13 +184,14 @@ impl KernelMitigationProvider {
         let provider = Self {
             mode,
             whitelist,
-            active_bans: Arc::new(RwLock::new(HashMap::new())),
+            active_bans: Arc::new(DashMap::with_hasher(RandomState::new())),
             table_family: "inet".to_string(),
             table_name: "filter".to_string(),
-            set_name: "r_nads_block".to_string(),
+            set_name_v4: "r_nads_block_v4".to_string(),
+            set_name_v6: "r_nads_block_v6".to_string(),
         };
 
-        // If in nftables mode on Linux, ensure set exists
+        // If in nftables mode on Linux, ensure both sets exist
         if mode == FirewallMode::Nftables && cfg!(target_os = "linux") {
             let _ = provider.init_nftables_table();
         }
@@ -198,14 +201,12 @@ impl KernelMitigationProvider {
 
     /// Number of active kernel-level bans.
     pub fn active_bans_count(&self) -> usize {
-        self.active_bans.read().unwrap().len()
+        self.active_bans.len()
     }
 
     /// Gets active rule identifier for an action id.
     pub fn get_rule_id(&self, action_id: &str) -> Option<String> {
         self.active_bans
-            .read()
-            .unwrap()
             .get(action_id)
             .map(|b| b.rule_identifier.clone())
     }
@@ -227,14 +228,14 @@ impl KernelMitigationProvider {
     }
 
     fn init_nftables_table(&self) -> Result<(), MitigationError> {
-        // nft add set inet filter r_nads_block { type ipv4_addr; flags interval, timeout; }
-        let output = Command::new("nft")
+        // nft add set inet filter r_nads_block_v4 { type ipv4_addr; flags timeout; }
+        let out_v4 = Command::new("nft")
             .args([
                 "add",
                 "set",
                 &self.table_family,
                 &self.table_name,
-                &self.set_name,
+                &self.set_name_v4,
                 "{",
                 "type",
                 "ipv4_addr;",
@@ -244,7 +245,28 @@ impl KernelMitigationProvider {
             ])
             .output();
 
-        match output {
+        if let Err(e) = out_v4 {
+            return Err(MitigationError::FirewallError(e.to_string()));
+        }
+
+        // nft add set inet filter r_nads_block_v6 { type ipv6_addr; flags timeout; }
+        let out_v6 = Command::new("nft")
+            .args([
+                "add",
+                "set",
+                &self.table_family,
+                &self.table_name,
+                &self.set_name_v6,
+                "{",
+                "type",
+                "ipv6_addr;",
+                "flags",
+                "timeout;",
+                "}",
+            ])
+            .output();
+
+        match out_v6 {
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => Err(MitigationError::FirewallError(
                 String::from_utf8_lossy(&out.stderr).to_string(),
@@ -264,6 +286,14 @@ impl MitigationProvider for KernelMitigationProvider {
             )));
         }
 
+        // Avoid duplicate application if already banned
+        if self.active_bans.contains_key(&action.action_id) {
+            return Ok(MitigationResult {
+                success: true,
+                provider_rule_id: format!("fw-{}-{}", action.action_id, action.target_ip),
+            });
+        }
+
         let ip_str = action.target_ip.to_string();
         let duration_secs = action.duration_secs;
 
@@ -271,6 +301,11 @@ impl MitigationProvider for KernelMitigationProvider {
         match self.mode {
             FirewallMode::Nftables => {
                 let timeout_arg = format!("{}s", duration_secs);
+                let set_target = if action.target_ip.is_ipv6() {
+                    &self.set_name_v6
+                } else {
+                    &self.set_name_v4
+                };
                 // Parameterized invocation: zero shell injection risk
                 let output = Command::new("nft")
                     .args([
@@ -278,7 +313,7 @@ impl MitigationProvider for KernelMitigationProvider {
                         "element",
                         "inet",
                         "filter",
-                        &self.set_name,
+                        set_target,
                         "{",
                         &ip_str,
                         "timeout",
@@ -318,8 +353,7 @@ impl MitigationProvider for KernelMitigationProvider {
 
         let rule_id = format!("fw-{}-{}", action.action_id, ip_str);
 
-        let mut bans = self.active_bans.write().unwrap();
-        bans.insert(
+        self.active_bans.insert(
             action.action_id.clone(),
             ActiveBan {
                 target_ip: action.target_ip,
@@ -335,25 +369,20 @@ impl MitigationProvider for KernelMitigationProvider {
     }
 
     fn remove(&self, action_id: &str) -> Result<(), MitigationError> {
-        let ban = {
-            let mut bans = self.active_bans.write().unwrap();
-            bans.remove(action_id)
-        };
+        let ban = self.active_bans.remove(action_id);
 
-        if let Some(active) = ban {
+        if let Some((_, active)) = ban {
             let ip_str = active.target_ip.to_string();
             match active.mode {
                 FirewallMode::Nftables => {
+                    let set_target = if active.target_ip.is_ipv6() {
+                        &self.set_name_v6
+                    } else {
+                        &self.set_name_v4
+                    };
                     let output = Command::new("nft")
                         .args([
-                            "delete",
-                            "element",
-                            "inet",
-                            "filter",
-                            &self.set_name,
-                            "{",
-                            &ip_str,
-                            "}",
+                            "delete", "element", "inet", "filter", set_target, "{", &ip_str, "}",
                         ])
                         .output()
                         .map_err(|e| MitigationError::FirewallError(e.to_string()))?;
