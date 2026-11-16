@@ -1,0 +1,13 @@
+[package]
+name = "r-nads-http"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical HTTP request modeling, zero-copy security representations, and normalizer"
+
+[dependencies]
+r-nads-common = { path = "../../core/r-nads-common" }
+serde = { version = "1.0", features = ["derive"] }
+unicode-normalization = "0.1"
+percent-encoding = "2.3"
+
+[dev-dependencies]

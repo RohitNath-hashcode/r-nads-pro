@@ -46,6 +46,31 @@ pub fn run_mitigation_server_with_ratelimit(
     packet_counter: Arc<AtomicU64>,
     latency_sum_us: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let waf_engine = Arc::new(r_nads_waf::WafEngine::new(r_nads_waf::WafConfig::default()));
+    run_mitigation_server_full(
+        bind_addr,
+        blocklist,
+        config,
+        rate_limiter,
+        waf_engine,
+        running,
+        packet_counter,
+        latency_sum_us,
+    )
+}
+
+/// Runs a high-performance mitigation server with rate limiter and WAF inspection engine.
+#[allow(clippy::too_many_arguments)]
+pub fn run_mitigation_server_full(
+    bind_addr: &str,
+    blocklist: Arc<DashMap<IpAddr, Instant>>,
+    config: Arc<RwLock<SystemConfig>>,
+    rate_limiter: Arc<r_nads_ratelimit::MultiDimensionalRateLimiter>,
+    waf_engine: Arc<r_nads_waf::WafEngine>,
+    running: Arc<AtomicBool>,
+    packet_counter: Arc<AtomicU64>,
+    latency_sum_us: Arc<AtomicU64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server = Server::http(bind_addr).map_err(|e| e.to_string())?;
     println!(
         "[Mitigation] Nginx HTTP auth_request server listening on {}",
@@ -149,6 +174,60 @@ pub fn run_mitigation_server_with_ratelimit(
                         .with_header(retry_header)
                         .with_header(limit_header)
                         .with_header(status_header);
+
+                    let _ = request.respond(response);
+                    continue;
+                }
+
+                // Check WAF inspection on request parameters and headers
+                let mut header_map = std::collections::HashMap::new();
+                for h in request.headers() {
+                    let field_name: &str = h.field.as_str().as_ref();
+                    header_map.insert(field_name.to_string(), h.value.as_str().to_string());
+                }
+
+                let target_uri = x_target_uri.unwrap_or(url);
+                let sec_req = r_nads_http::SecurityRequest::new(
+                    client_ip,
+                    request.method().as_str(),
+                    target_uri,
+                    header_map,
+                    None,
+                    131_072,
+                );
+
+                let waf_violations = waf_engine.inspect(&sec_req);
+                if !waf_violations.is_empty() {
+                    let waf_decision = waf_engine.make_decision(&waf_violations, 1);
+                    let is_waf_deny = waf_decision.action == DecisionAction::Deny;
+                    let status_code = if is_waf_deny { 403 } else { 200 };
+
+                    let waf_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-WAF-Violation: {}",
+                        waf_violations[0].pattern_name
+                    ))
+                    .unwrap();
+                    let status_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-Detection-Status: {}",
+                        if is_waf_deny {
+                            "WafBlocked"
+                        } else {
+                            "WafMonitored"
+                        }
+                    ))
+                    .unwrap();
+                    let decision_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-Decision-ID: {}",
+                        waf_decision.decision_id
+                    ))
+                    .unwrap();
+
+                    let response =
+                        Response::from_string(if is_waf_deny { "Forbidden" } else { "OK" })
+                            .with_status_code(status_code)
+                            .with_header(waf_header)
+                            .with_header(status_header)
+                            .with_header(decision_header);
 
                     let _ = request.respond(response);
                     continue;

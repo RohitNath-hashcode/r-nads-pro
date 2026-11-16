@@ -18,9 +18,10 @@ use r_nads_decision::MitigationProvider;
 use r_nads_events::AnomalyAlert;
 use r_nads_firewall::{FirewallMode, KernelMitigationProvider, SafetyWhitelist};
 use r_nads_inference::{InferenceEngine, ModelConfig, MODEL_CONFIG};
-use r_nads_nginx::run_mitigation_server_with_ratelimit;
+use r_nads_nginx::run_mitigation_server_full;
 use r_nads_producer::{run_live_capture, run_mock_capture, run_pcap_file_capture};
 use r_nads_ratelimit::{MultiDimensionalRateLimiter, RateLimiterConfig};
+use r_nads_waf::{WafConfig, WafEngine};
 
 /// Asynchronous firewall mitigation command
 #[derive(Debug, Clone)]
@@ -379,11 +380,13 @@ fn start_classification_pipeline(
 
     let blocklist = Arc::new(DashMap::<IpAddr, Instant>::new());
 
-    // Initialize Rate Limiter & Kernel Mitigation Provider
+    // Initialize Rate Limiter & Kernel Mitigation Provider & WAF Engine
     let rate_limiter = Arc::new(MultiDimensionalRateLimiter::new(
         &RateLimiterConfig::default(),
         Arc::new(r_nads_decision::SystemTimeSource),
     ));
+
+    let waf_engine = Arc::new(WafEngine::new(WafConfig::default()));
 
     let firewall_provider: Arc<dyn MitigationProvider> = {
         #[cfg(target_os = "linux")]
@@ -441,14 +444,16 @@ fn start_classification_pipeline(
     let packet_counter_mitigation = packet_counter.clone();
     let latency_sum_mitigation = latency_sum_us.clone();
     let rate_limiter_mitigation = rate_limiter.clone();
+    let waf_engine_mitigation = waf_engine.clone();
     let mitigation_thread = thread::Builder::new()
         .name("mitigation".to_string())
         .spawn(move || {
-            if let Err(e) = run_mitigation_server_with_ratelimit(
+            if let Err(e) = run_mitigation_server_full(
                 &bind_addr,
                 blocklist_mitigation,
                 config_mitigation,
                 rate_limiter_mitigation,
+                waf_engine_mitigation,
                 running_mitigation,
                 packet_counter_mitigation,
                 latency_sum_mitigation,

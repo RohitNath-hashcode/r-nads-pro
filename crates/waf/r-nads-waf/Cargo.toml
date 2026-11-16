@@ -1,0 +1,16 @@
+[package]
+name = "r-nads-waf"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust high-performance WAF inspection engine with OWASP attack vectors"
+
+[dependencies]
+r-nads-common = { path = "../../core/r-nads-common" }
+r-nads-decision = { path = "../../core/r-nads-decision" }
+r-nads-http = { path = "../r-nads-http" }
+regex = "1.10"
+aho-corasick = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+
+[dev-dependencies]

@@ -7,6 +7,8 @@ edition = "2021"
 r-nads-config = { path = "../../core/r-nads-config" }
 r-nads-decision = { path = "../../core/r-nads-decision" }
 r-nads-ratelimit = { path = "../../traffic/r-nads-ratelimit" }
+r-nads-http = { path = "../../waf/r-nads-http" }
+r-nads-waf = { path = "../../waf/r-nads-waf" }
 dashmap = "5.5"
 tiny_http = "0.12"
 serde_json = "1.0"

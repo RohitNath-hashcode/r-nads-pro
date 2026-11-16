@@ -23,6 +23,8 @@ r-nads-inference = { path = "../../crates/network/r-nads-inference" }
 r-nads-producer = { path = "../../crates/network/r-nads-producer" }
 r-nads-nginx = { path = "../../crates/enforcement/r-nads-nginx" }
 r-nads-ratelimit = { path = "../../crates/traffic/r-nads-ratelimit" }
+r-nads-http = { path = "../../crates/waf/r-nads-http" }
+r-nads-waf = { path = "../../crates/waf/r-nads-waf" }
 r-nads-firewall = { path = "../../crates/enforcement/r-nads-firewall" }
 
 [target.'cfg(target_os = "windows")'.dependencies]

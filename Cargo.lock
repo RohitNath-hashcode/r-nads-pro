@@ -722,6 +722,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "percent-encoding"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -800,10 +806,12 @@ dependencies = [
  "r-nads-decision",
  "r-nads-events",
  "r-nads-firewall",
+ "r-nads-http",
  "r-nads-inference",
  "r-nads-nginx",
  "r-nads-producer",
  "r-nads-ratelimit",
+ "r-nads-waf",
  "rusqlite",
  "serde",
  "serde_json",
@@ -880,6 +888,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-nads-http"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "r-nads-common",
+ "serde",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "r-nads-inference"
 version = "0.1.0"
 dependencies = [
@@ -898,7 +916,9 @@ dependencies = [
  "dashmap",
  "r-nads-config",
  "r-nads-decision",
+ "r-nads-http",
  "r-nads-ratelimit",
+ "r-nads-waf",
  "rusqlite",
  "serde_json",
  "tiny_http",
@@ -924,6 +944,19 @@ dependencies = [
  "dashmap",
  "r-nads-common",
  "r-nads-decision",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "r-nads-waf"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "r-nads-common",
+ "r-nads-decision",
+ "r-nads-http",
+ "regex",
  "serde",
  "thiserror",
 ]
@@ -1162,6 +1195,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1207,6 +1246,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "utf8parse"
