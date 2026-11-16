@@ -14,10 +14,13 @@ use std::time::{Duration, Instant};
 use r_nads_aggregator::{FlowMetrics, FlowTable};
 use r_nads_common::PacketEvent;
 use r_nads_config::{spawn_config_watcher, AppConfig, SystemConfig};
+use r_nads_decision::MitigationProvider;
 use r_nads_events::AnomalyAlert;
+use r_nads_firewall::{FirewallMode, KernelMitigationProvider, SafetyWhitelist};
 use r_nads_inference::{InferenceEngine, ModelConfig, MODEL_CONFIG};
-use r_nads_nginx::run_mitigation_server;
+use r_nads_nginx::run_mitigation_server_with_ratelimit;
 use r_nads_producer::{run_live_capture, run_mock_capture, run_pcap_file_capture};
+use r_nads_ratelimit::{MultiDimensionalRateLimiter, RateLimiterConfig};
 
 /// R-NADS Agent CLI Arguments
 #[derive(Parser, Debug)]
@@ -369,6 +372,29 @@ fn start_classification_pipeline(
 
     let blocklist = Arc::new(DashMap::<IpAddr, Instant>::new());
 
+    // Initialize Rate Limiter & Kernel Mitigation Provider
+    let rate_limiter = Arc::new(MultiDimensionalRateLimiter::new(
+        &RateLimiterConfig::default(),
+        Arc::new(r_nads_decision::SystemTimeSource),
+    ));
+
+    let firewall_provider: Arc<dyn MitigationProvider> = {
+        #[cfg(target_os = "linux")]
+        {
+            Arc::new(KernelMitigationProvider::new(
+                FirewallMode::Nftables,
+                SafetyWhitelist::default(),
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Arc::new(KernelMitigationProvider::new(
+                FirewallMode::Mock,
+                SafetyWhitelist::default(),
+            ))
+        }
+    };
+
     // Channels for alerts
     let (alert_tx, alert_rx) = unbounded::<AnomalyAlert>();
     let mut threads = Vec::new();
@@ -379,13 +405,15 @@ fn start_classification_pipeline(
     let config_mitigation = config;
     let packet_counter_mitigation = packet_counter.clone();
     let latency_sum_mitigation = latency_sum_us.clone();
+    let rate_limiter_mitigation = rate_limiter.clone();
     let mitigation_thread = thread::Builder::new()
         .name("mitigation".to_string())
         .spawn(move || {
-            if let Err(e) = run_mitigation_server(
+            if let Err(e) = run_mitigation_server_with_ratelimit(
                 &bind_addr,
                 blocklist_mitigation,
                 config_mitigation,
+                rate_limiter_mitigation,
                 running_mitigation,
                 packet_counter_mitigation,
                 latency_sum_mitigation,
@@ -501,10 +529,11 @@ fn start_classification_pipeline(
         })?;
     threads.push(database_thread);
 
-    // 3. Spawn Inference Engine thread with Model Drift Reporting
+    // 3. Spawn Inference Engine thread with Model Drift Reporting & Kernel Mitigation
     let running_flag = running.clone();
     let blocklist_inference = blocklist.clone();
     let alert_tx_c = alert_tx;
+    let firewall_mitigation = firewall_provider.clone();
 
     let inference_thread = thread::Builder::new()
         .name("inference".to_string())
@@ -531,11 +560,24 @@ fn start_classification_pipeline(
                         // Track anomalous IPs in the blocklist map
                         blocklist_inference.insert(client_ip, Instant::now());
 
+                        // Apply kernel firewall mitigation
+                        let action = r_nads_decision::MitigationAction {
+                            action_id: format!("ban_{}", client_ip),
+                            target_ip: client_ip,
+                            duration_secs: 300,
+                            reason: format!("SVDD anomaly score: {:.4}", res.anomaly_ratio),
+                        };
+                        if let Err(e) = firewall_mitigation.apply(&action) {
+                            eprintln!("[Firewall] Failed to apply kernel mitigation: {}", e);
+                        }
+
                         let _ = alert_tx_c.send(alert);
                     } else {
                         // Behavioral unblocking: IP returned to normal SVDD space
                         if blocklist_inference.contains_key(&client_ip) {
                             blocklist_inference.remove(&client_ip);
+                            let action_id = format!("ban_{}", client_ip);
+                            let _ = firewall_mitigation.remove(&action_id);
                             println!(
                                 "[Mitigation] IP {} returned to normal SVDD bounds. Active behavioral unblock triggered.",
                                 client_ip

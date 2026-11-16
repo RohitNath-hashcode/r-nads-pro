@@ -799,9 +799,11 @@ dependencies = [
  "r-nads-config",
  "r-nads-decision",
  "r-nads-events",
+ "r-nads-firewall",
  "r-nads-inference",
  "r-nads-nginx",
  "r-nads-producer",
+ "r-nads-ratelimit",
  "rusqlite",
  "serde",
  "serde_json",
@@ -826,7 +828,9 @@ dependencies = [
  "criterion",
  "r-nads-aggregator",
  "r-nads-common",
+ "r-nads-decision",
  "r-nads-inference",
+ "r-nads-ratelimit",
 ]
 
 [[package]]
@@ -864,6 +868,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-nads-firewall"
+version = "0.1.0"
+dependencies = [
+ "r-nads-common",
+ "r-nads-decision",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "r-nads-inference"
 version = "0.1.0"
 dependencies = [
@@ -882,6 +896,7 @@ dependencies = [
  "dashmap",
  "r-nads-config",
  "r-nads-decision",
+ "r-nads-ratelimit",
  "rusqlite",
  "serde_json",
  "tiny_http",
@@ -896,6 +911,19 @@ dependencies = [
  "pcap",
  "pcap-file",
  "r-nads-common",
+]
+
+[[package]]
+name = "r-nads-ratelimit"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "criterion",
+ "dashmap",
+ "r-nads-common",
+ "r-nads-decision",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

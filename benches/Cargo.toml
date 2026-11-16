@@ -5,8 +5,10 @@ edition = "2021"
 
 [dependencies]
 r-nads-common = { path = "../crates/core/r-nads-common" }
+r-nads-decision = { path = "../crates/core/r-nads-decision" }
 r-nads-aggregator = { path = "../crates/network/r-nads-aggregator" }
 r-nads-inference = { path = "../crates/network/r-nads-inference" }
+r-nads-ratelimit = { path = "../crates/traffic/r-nads-ratelimit" }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -14,4 +16,9 @@ criterion = "0.5"
 [[bench]]
 name = "flow_table_bench"
 path = "flow_table_bench.rs"
+harness = false
+
+[[bench]]
+name = "ratelimit_bench"
+path = "ratelimit_bench.rs"
 harness = false

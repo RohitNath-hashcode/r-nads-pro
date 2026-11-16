@@ -1,0 +1,13 @@
+[package]
+name = "r-nads-firewall"
+version = "0.1.0"
+edition = "2021"
+description = "Kernel-level firewall mitigation provider (nftables / iptables) with safety whitelisting"
+
+[dependencies]
+r-nads-common = { path = "../../core/r-nads-common" }
+r-nads-decision = { path = "../../core/r-nads-decision" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+
+[dev-dependencies]

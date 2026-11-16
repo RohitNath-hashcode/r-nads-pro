@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 r-nads-config = { path = "../../core/r-nads-config" }
 r-nads-decision = { path = "../../core/r-nads-decision" }
+r-nads-ratelimit = { path = "../../traffic/r-nads-ratelimit" }
 dashmap = "5.5"
 tiny_http = "0.12"
 serde_json = "1.0"

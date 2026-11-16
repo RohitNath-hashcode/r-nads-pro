@@ -22,6 +22,8 @@ r-nads-aggregator = { path = "../../crates/network/r-nads-aggregator" }
 r-nads-inference = { path = "../../crates/network/r-nads-inference" }
 r-nads-producer = { path = "../../crates/network/r-nads-producer" }
 r-nads-nginx = { path = "../../crates/enforcement/r-nads-nginx" }
+r-nads-ratelimit = { path = "../../crates/traffic/r-nads-ratelimit" }
+r-nads-firewall = { path = "../../crates/enforcement/r-nads-firewall" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }

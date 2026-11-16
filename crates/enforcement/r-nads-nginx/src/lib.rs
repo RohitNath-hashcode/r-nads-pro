@@ -21,6 +21,31 @@ pub fn run_mitigation_server(
     packet_counter: Arc<AtomicU64>,
     latency_sum_us: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let rate_limiter = Arc::new(r_nads_ratelimit::MultiDimensionalRateLimiter::new(
+        &r_nads_ratelimit::RateLimiterConfig::default(),
+        Arc::new(r_nads_decision::SystemTimeSource),
+    ));
+    run_mitigation_server_with_ratelimit(
+        bind_addr,
+        blocklist,
+        config,
+        rate_limiter,
+        running,
+        packet_counter,
+        latency_sum_us,
+    )
+}
+
+/// Runs a high-performance mitigation server with a dedicated rate limiter instance.
+pub fn run_mitigation_server_with_ratelimit(
+    bind_addr: &str,
+    blocklist: Arc<DashMap<IpAddr, Instant>>,
+    config: Arc<RwLock<SystemConfig>>,
+    rate_limiter: Arc<r_nads_ratelimit::MultiDimensionalRateLimiter>,
+    running: Arc<AtomicBool>,
+    packet_counter: Arc<AtomicU64>,
+    latency_sum_us: Arc<AtomicU64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server = Server::http(bind_addr).map_err(|e| e.to_string())?;
     println!(
         "[Mitigation] Nginx HTTP auth_request server listening on {}",
@@ -70,6 +95,18 @@ pub fn run_mitigation_server(
                         .unwrap_or_else(|| "127.0.0.1".parse().unwrap())
                 });
 
+                // Check rate limits for client IP (and target route if passed via X-Target-URI)
+                let x_target_uri = request
+                    .headers()
+                    .iter()
+                    .find(|h| {
+                        let field_str: &str = h.field.as_str().as_ref();
+                        field_str.eq_ignore_ascii_case("X-Target-URI")
+                    })
+                    .map(|h| h.value.as_str().trim());
+
+                let rate_limit_decision = rate_limiter.evaluate(client_ip, x_target_uri);
+
                 let (current_ttl, current_mitigation_mode) = {
                     let cfg = config.read().unwrap();
                     (cfg.block_list_ttl, cfg.mitigation_mode.clone())
@@ -87,6 +124,35 @@ pub fn run_mitigation_server(
                 } else {
                     false
                 };
+
+                // Check rate limiting first
+                if let r_nads_ratelimit::RateLimitDecision::Limited {
+                    retry_after_ms,
+                    violated_limit,
+                } = rate_limit_decision
+                {
+                    let retry_secs = (retry_after_ms / 1000).max(1);
+                    let retry_header =
+                        tiny_http::Header::from_str(&format!("Retry-After: {}", retry_secs))
+                            .unwrap();
+                    let limit_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-RateLimit-Violated: {}",
+                        violated_limit
+                    ))
+                    .unwrap();
+                    let status_header =
+                        tiny_http::Header::from_str("X-RNADS-Detection-Status: RateLimited")
+                            .unwrap();
+
+                    let response = Response::from_string("Too Many Requests")
+                        .with_status_code(429)
+                        .with_header(retry_header)
+                        .with_header(limit_header)
+                        .with_header(status_header);
+
+                    let _ = request.respond(response);
+                    continue;
+                }
 
                 // Synthesize decision via r-nads-decision contract
                 let decision = SecurityDecision::from_anomaly(
