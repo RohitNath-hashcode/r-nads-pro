@@ -28,6 +28,7 @@ r-nads-waf = { path = "../../crates/waf/r-nads-waf" }
 r-nads-fingerprint = { path = "../../crates/identity/r-nads-fingerprint" }
 r-nads-bot-detection = { path = "../../crates/identity/r-nads-bot-detection" }
 r-nads-firewall = { path = "../../crates/enforcement/r-nads-firewall" }
+r-nads-proxy = { path = "../../crates/gateway/r-nads-proxy" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
