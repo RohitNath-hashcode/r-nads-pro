@@ -27,6 +27,44 @@ pub struct BotClassification {
     pub should_block: bool,
 }
 
+const VERIFIED_BOTS: &[&str] = &[
+    "googlebot",
+    "bingbot",
+    "duckduckbot",
+    "yandexbot",
+    "baiduspider",
+];
+
+const HEADLESS_SIGNATURES: &[&str] = &[
+    "headlesschrome",
+    "phantomjs",
+    "selenium",
+    "webdriver",
+    "puppeteer",
+    "playwright",
+];
+
+const AUTOMATED_TOOLS: &[&str] = &[
+    "curl/",
+    "python-requests",
+    "go-http-client",
+    "postmanruntime",
+    "wget/",
+    "httpclient",
+    "aiohttp",
+];
+
+const MALICIOUS_SCANNERS: &[&str] = &[
+    "sqlmap",
+    "nikto",
+    "masscan",
+    "nmap",
+    "zgrab",
+    "dirbuster",
+    "gobuster",
+    "wpscan",
+];
+
 /// Fast behavioral and signature-based bot detection engine.
 pub struct BotDetectionEngine {
     verified_bot_matcher: AhoCorasick,
@@ -43,57 +81,22 @@ impl Default for BotDetectionEngine {
 
 impl BotDetectionEngine {
     pub fn new() -> Self {
-        let verified_bots = &[
-            "googlebot",
-            "bingbot",
-            "duckduckbot",
-            "yandexbot",
-            "baiduspider",
-        ];
-        let headless_signatures = &[
-            "headlesschrome",
-            "phantomjs",
-            "selenium",
-            "webdriver",
-            "puppeteer",
-            "playwright",
-        ];
-        let automated_tools = &[
-            "curl/",
-            "python-requests",
-            "go-http-client",
-            "postmanruntime",
-            "wget/",
-            "httpclient",
-            "aiohttp",
-        ];
-        let malicious_scanners = &[
-            "sqlmap",
-            "nikto",
-            "masscan",
-            "nmap",
-            "zgrab",
-            "dirbuster",
-            "gobuster",
-            "wpscan",
-        ];
-
         Self {
             verified_bot_matcher: AhoCorasick::builder()
                 .ascii_case_insensitive(true)
-                .build(verified_bots)
+                .build(VERIFIED_BOTS)
                 .unwrap(),
             headless_matcher: AhoCorasick::builder()
                 .ascii_case_insensitive(true)
-                .build(headless_signatures)
+                .build(HEADLESS_SIGNATURES)
                 .unwrap(),
             automated_tool_matcher: AhoCorasick::builder()
                 .ascii_case_insensitive(true)
-                .build(automated_tools)
+                .build(AUTOMATED_TOOLS)
                 .unwrap(),
             malicious_scanner_matcher: AhoCorasick::builder()
                 .ascii_case_insensitive(true)
-                .build(malicious_scanners)
+                .build(MALICIOUS_SCANNERS)
                 .unwrap(),
         }
     }
@@ -104,10 +107,15 @@ impl BotDetectionEngine {
 
         // 1. Check Malicious Scanners (Highest Priority Block)
         if let Some(m) = self.malicious_scanner_matcher.find(ua_str) {
+            let pattern_idx = m.pattern().as_usize();
+            let pattern_name = MALICIOUS_SCANNERS
+                .get(pattern_idx)
+                .copied()
+                .unwrap_or("unknown_scanner");
             return BotClassification {
                 category: ClientCategory::MaliciousScanner,
                 confidence: 0.99,
-                matched_signature: Some(format!("scanner_pattern_{:?}", m.pattern())),
+                matched_signature: Some(format!("scanner_pattern_{}", pattern_name)),
                 should_challenge: false,
                 should_block: true,
             };
@@ -115,10 +123,15 @@ impl BotDetectionEngine {
 
         // 2. Check Headless Browsers
         if let Some(m) = self.headless_matcher.find(ua_str) {
+            let pattern_idx = m.pattern().as_usize();
+            let pattern_name = HEADLESS_SIGNATURES
+                .get(pattern_idx)
+                .copied()
+                .unwrap_or("unknown_headless");
             return BotClassification {
                 category: ClientCategory::HeadlessBrowser,
                 confidence: 0.95,
-                matched_signature: Some(format!("headless_pattern_{:?}", m.pattern())),
+                matched_signature: Some(format!("headless_pattern_{}", pattern_name)),
                 should_challenge: true,
                 should_block: false,
             };
@@ -126,10 +139,15 @@ impl BotDetectionEngine {
 
         // 3. Check Automated HTTP Libraries (curl, requests, etc.)
         if let Some(m) = self.automated_tool_matcher.find(ua_str) {
+            let pattern_idx = m.pattern().as_usize();
+            let pattern_name = AUTOMATED_TOOLS
+                .get(pattern_idx)
+                .copied()
+                .unwrap_or("unknown_tool");
             return BotClassification {
                 category: ClientCategory::AutomatedTool,
                 confidence: 0.90,
-                matched_signature: Some(format!("tool_pattern_{:?}", m.pattern())),
+                matched_signature: Some(format!("tool_pattern_{}", pattern_name)),
                 should_challenge: false,
                 should_block: false, // By default allowed unless route requires interactive browser
             };
@@ -137,10 +155,15 @@ impl BotDetectionEngine {
 
         // 4. Check Search Engine Crawlers
         if let Some(m) = self.verified_bot_matcher.find(ua_str) {
+            let pattern_idx = m.pattern().as_usize();
+            let pattern_name = VERIFIED_BOTS
+                .get(pattern_idx)
+                .copied()
+                .unwrap_or("unknown_crawler");
             return BotClassification {
                 category: ClientCategory::VerifiedBot,
                 confidence: 0.85,
-                matched_signature: Some(format!("crawler_pattern_{:?}", m.pattern())),
+                matched_signature: Some(format!("crawler_pattern_{}", pattern_name)),
                 should_challenge: false,
                 should_block: false,
             };
@@ -234,6 +257,10 @@ mod tests {
 
         assert_eq!(classification.category, ClientCategory::MaliciousScanner);
         assert!(classification.should_block);
+        assert_eq!(
+            classification.matched_signature.as_deref(),
+            Some("scanner_pattern_sqlmap")
+        );
 
         let dec = engine.make_decision(&classification, 1);
         assert_eq!(dec.action, DecisionAction::Deny);
@@ -257,6 +284,10 @@ mod tests {
 
         assert_eq!(classification.category, ClientCategory::HeadlessBrowser);
         assert!(classification.should_challenge);
+        assert_eq!(
+            classification.matched_signature.as_deref(),
+            Some("headless_pattern_headlesschrome")
+        );
 
         let dec = engine.make_decision(&classification, 1);
         assert_eq!(dec.action, DecisionAction::Challenge);

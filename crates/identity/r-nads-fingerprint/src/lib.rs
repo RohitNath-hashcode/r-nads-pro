@@ -37,46 +37,77 @@ impl FingerprintEngine {
         }
     }
 
-    /// Computes the normalized and salted privacy fingerprint from an incoming HTTP SecurityRequest.
-    pub fn fingerprint(&self, req: &SecurityRequest) -> ClientIdentity {
-        let user_agent = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
-            .map(|(_, v)| v.clone());
-        let accept_language = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("accept-language"))
-            .map(|(_, v)| v.clone());
-        let accept_encoding = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
-            .map(|(_, v)| v.clone());
-        let ja4_hint = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-ja4"))
-            .map(|(_, v)| v.clone());
+    /// Creates a fingerprint engine initialized from the `RNADS_IDENTITY_SALT` environment variable,
+    /// falling back to the default key if unset or invalid length.
+    pub fn from_env() -> Self {
+        if let Ok(salt_str) = std::env::var("RNADS_IDENTITY_SALT") {
+            let bytes = salt_str.as_bytes();
+            if bytes.len() >= 32 {
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes[..32]);
+                return Self::new(salt);
+            }
+        }
+        Self::with_default_key()
+    }
 
-        // Header structure ordering fingerprint (fingerprints client HTTP stack implementation)
-        let mut header_names: Vec<String> =
-            req.headers.keys().map(|k| k.to_ascii_lowercase()).collect();
-        header_names.sort(); // Canonical sorted representation for stable comparison
-        let header_order_repr = header_names.join(",");
+    /// Computes the normalized and salted privacy fingerprint from an incoming HTTP SecurityRequest.
+    /// Employs a single-pass zero-copy header extraction and case-insensitive header ordering.
+    pub fn fingerprint(&self, req: &SecurityRequest) -> ClientIdentity {
+        let mut user_agent: Option<&str> = None;
+        let mut accept_language: Option<&str> = None;
+        let mut accept_encoding: Option<&str> = None;
+        let mut ja4_hint: Option<&str> = None;
+
+        let mut header_names: Vec<&str> = Vec::with_capacity(req.headers.len());
+
+        for (k, v) in &req.headers {
+            header_names.push(k.as_str());
+            if k.eq_ignore_ascii_case("user-agent") {
+                user_agent = Some(v.as_str());
+            } else if k.eq_ignore_ascii_case("accept-language") {
+                accept_language = Some(v.as_str());
+            } else if k.eq_ignore_ascii_case("accept-encoding") {
+                accept_encoding = Some(v.as_str());
+            } else if k.eq_ignore_ascii_case("x-ja4") {
+                ja4_hint = Some(v.as_str());
+            }
+        }
+
+        // Canonical header structure ordering (case-insensitive unstable sort to avoid allocs)
+        header_names.sort_unstable_by_key(|a| a.to_ascii_lowercase());
 
         let mut header_hasher = Hasher::new_keyed(&self.secret_salt);
-        header_hasher.update(header_order_repr.as_bytes());
+        for (i, name) in header_names.iter().enumerate() {
+            if i > 0 {
+                header_hasher.update(b",");
+            }
+            // Hash lowercase representation in-flight to prevent case variance across proxies
+            for b in name.bytes() {
+                header_hasher.update(&[b.to_ascii_lowercase()]);
+            }
+        }
         let header_order_hash = header_hasher.finalize().to_hex()[..16].to_string();
 
         // Master privacy-preserving fingerprint
         let mut master_hasher = Hasher::new_keyed(&self.secret_salt);
-        master_hasher.update(req.client_ip.to_string().as_bytes());
+
+        // Directly hash native IP octets to eliminate intermediate String allocation
+        match req.client_ip {
+            IpAddr::V4(v4) => {
+                master_hasher.update(b"v4:");
+                master_hasher.update(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                master_hasher.update(b"v6:");
+                master_hasher.update(&v6.octets());
+            }
+        }
+
         master_hasher.update(b"|");
-        master_hasher.update(user_agent.as_deref().unwrap_or("none").as_bytes());
+        master_hasher.update(user_agent.unwrap_or("none").as_bytes());
         master_hasher.update(b"|");
-        master_hasher.update(accept_language.as_deref().unwrap_or("none").as_bytes());
+        master_hasher.update(accept_language.unwrap_or("none").as_bytes());
         master_hasher.update(b"|");
         master_hasher.update(header_order_hash.as_bytes());
 
@@ -84,11 +115,11 @@ impl FingerprintEngine {
 
         ClientIdentity {
             client_ip: req.client_ip,
-            user_agent,
-            accept_language,
-            accept_encoding,
+            user_agent: user_agent.map(|s| s.to_string()),
+            accept_language: accept_language.map(|s| s.to_string()),
+            accept_encoding: accept_encoding.map(|s| s.to_string()),
             header_order_hash,
-            ja4_hint,
+            ja4_hint: ja4_hint.map(|s| s.to_string()),
             privacy_fingerprint,
         }
     }
@@ -148,5 +179,28 @@ mod tests {
             id1.privacy_fingerprint, id2.privacy_fingerprint,
             "Different IPs must yield distinct fingerprints"
         );
+    }
+
+    #[test]
+    fn test_header_casing_insensitivity() {
+        let engine = FingerprintEngine::with_default_key();
+        let ip: IpAddr = "203.0.113.5".parse().unwrap();
+
+        let mut headers1 = HashMap::new();
+        headers1.insert("User-Agent".to_string(), "Mozilla/5.0".to_string());
+        headers1.insert("Accept-Language".to_string(), "en".to_string());
+
+        let mut headers2 = HashMap::new();
+        headers2.insert("user-agent".to_string(), "Mozilla/5.0".to_string());
+        headers2.insert("accept-language".to_string(), "en".to_string());
+
+        let req1 = SecurityRequest::new(ip, "GET", "/", headers1, None, 1024);
+        let req2 = SecurityRequest::new(ip, "GET", "/", headers2, None, 1024);
+
+        let id1 = engine.fingerprint(&req1);
+        let id2 = engine.fingerprint(&req2);
+
+        assert_eq!(id1.header_order_hash, id2.header_order_hash);
+        assert_eq!(id1.privacy_fingerprint, id2.privacy_fingerprint);
     }
 }

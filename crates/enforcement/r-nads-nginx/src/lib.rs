@@ -327,6 +327,16 @@ pub fn run_mitigation_server_full(
                     decision.decision_id
                 ))
                 .unwrap();
+                let fp_header = tiny_http::Header::from_str(&format!(
+                    "X-RNADS-Client-Fingerprint: {}",
+                    client_identity.privacy_fingerprint
+                ))
+                .unwrap();
+                let bot_header = tiny_http::Header::from_str(&format!(
+                    "X-RNADS-Bot-Category: {:?}",
+                    bot_classification.category
+                ))
+                .unwrap();
 
                 let status_code = if is_actually_mitigated { 403 } else { 200 };
                 let body_str = if is_actually_mitigated {
@@ -340,7 +350,9 @@ pub fn run_mitigation_server_full(
                     .with_header(mode_header)
                     .with_header(status_header)
                     .with_header(anomaly_header)
-                    .with_header(decision_header);
+                    .with_header(decision_header)
+                    .with_header(fp_header)
+                    .with_header(bot_header);
 
                 let _ = request.respond(response);
             } else if url == "/api/stats" {
