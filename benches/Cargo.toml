@@ -12,6 +12,14 @@ r-nads-ratelimit = { path = "../crates/traffic/r-nads-ratelimit" }
 r-nads-http = { path = "../crates/waf/r-nads-http" }
 r-nads-fingerprint = { path = "../crates/identity/r-nads-fingerprint" }
 r-nads-bot-detection = { path = "../crates/identity/r-nads-bot-detection" }
+r-nads-proxy = { path = "../crates/gateway/r-nads-proxy" }
+r-nads-waf = { path = "../crates/waf/r-nads-waf" }
+r-nads-config = { path = "../crates/core/r-nads-config" }
+dashmap = "5.5"
+pingora-core = "0.9"
+pingora-load-balancing = "0.9"
+pingora-proxy = "0.9"
+tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -29,4 +37,9 @@ harness = false
 [[bench]]
 name = "identity_bench"
 path = "identity_bench.rs"
+harness = false
+
+[[bench]]
+name = "gateway_bench"
+path = "gateway_bench.rs"
 harness = false
