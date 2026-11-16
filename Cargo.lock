@@ -1657,14 +1657,22 @@ name = "r-nads-benches"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "dashmap",
+ "pingora-core",
+ "pingora-load-balancing",
+ "pingora-proxy",
  "r-nads-aggregator",
  "r-nads-bot-detection",
  "r-nads-common",
+ "r-nads-config",
  "r-nads-decision",
  "r-nads-fingerprint",
  "r-nads-http",
  "r-nads-inference",
+ "r-nads-proxy",
  "r-nads-ratelimit",
+ "r-nads-waf",
+ "tokio",
 ]
 
 [[package]]
