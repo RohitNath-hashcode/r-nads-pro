@@ -12,10 +12,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use r_nads_aggregator::{FlowMetrics, FlowTable};
+use r_nads_bot_detection::BotDetectionEngine;
 use r_nads_common::PacketEvent;
 use r_nads_config::{spawn_config_watcher, AppConfig, SystemConfig};
 use r_nads_decision::MitigationProvider;
 use r_nads_events::AnomalyAlert;
+use r_nads_fingerprint::FingerprintEngine;
 use r_nads_firewall::{FirewallMode, KernelMitigationProvider, SafetyWhitelist};
 use r_nads_inference::{InferenceEngine, ModelConfig, MODEL_CONFIG};
 use r_nads_nginx::run_mitigation_server_full;
@@ -380,13 +382,15 @@ fn start_classification_pipeline(
 
     let blocklist = Arc::new(DashMap::<IpAddr, Instant>::new());
 
-    // Initialize Rate Limiter & Kernel Mitigation Provider & WAF Engine
+    // Initialize Rate Limiter & Kernel Mitigation Provider & WAF Engine & Identity Engines
     let rate_limiter = Arc::new(MultiDimensionalRateLimiter::new(
         &RateLimiterConfig::default(),
         Arc::new(r_nads_decision::SystemTimeSource),
     ));
 
     let waf_engine = Arc::new(WafEngine::new(WafConfig::default()));
+    let fingerprint_engine = Arc::new(FingerprintEngine::with_default_key());
+    let bot_engine = Arc::new(BotDetectionEngine::new());
 
     let firewall_provider: Arc<dyn MitigationProvider> = {
         #[cfg(target_os = "linux")]
@@ -445,6 +449,8 @@ fn start_classification_pipeline(
     let latency_sum_mitigation = latency_sum_us.clone();
     let rate_limiter_mitigation = rate_limiter.clone();
     let waf_engine_mitigation = waf_engine.clone();
+    let fp_engine_mitigation = fingerprint_engine.clone();
+    let bot_engine_mitigation = bot_engine.clone();
     let mitigation_thread = thread::Builder::new()
         .name("mitigation".to_string())
         .spawn(move || {
@@ -454,6 +460,8 @@ fn start_classification_pipeline(
                 config_mitigation,
                 rate_limiter_mitigation,
                 waf_engine_mitigation,
+                fp_engine_mitigation,
+                bot_engine_mitigation,
                 running_mitigation,
                 packet_counter_mitigation,
                 latency_sum_mitigation,

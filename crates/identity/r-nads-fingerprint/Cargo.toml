@@ -1,0 +1,14 @@
+[package]
+name = "r-nads-fingerprint"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-signal client fingerprinting with privacy-preserving keyed Blake3 hashing"
+
+[dependencies]
+r-nads-common = { path = "../../core/r-nads-common" }
+r-nads-http = { path = "../../waf/r-nads-http" }
+blake3 = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]

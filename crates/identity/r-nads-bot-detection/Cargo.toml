@@ -1,0 +1,15 @@
+[package]
+name = "r-nads-bot-detection"
+version = "0.1.0"
+edition = "2021"
+description = "Behavioral bot classification engine distinguishing search engines, scrapers, and headless browsers"
+
+[dependencies]
+r-nads-common = { path = "../../core/r-nads-common" }
+r-nads-decision = { path = "../../core/r-nads-decision" }
+r-nads-http = { path = "../../waf/r-nads-http" }
+r-nads-fingerprint = { path = "../r-nads-fingerprint" }
+serde = { version = "1.0", features = ["derive"] }
+aho-corasick = "1.1"
+
+[dev-dependencies]

@@ -5,6 +5,7 @@ members = [
     "crates/network/*",
     "crates/traffic/*",
     "crates/waf/*",
+    "crates/identity/*",
     "crates/enforcement/*",
     "services/*",
     "benches",

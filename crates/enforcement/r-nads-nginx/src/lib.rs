@@ -47,19 +47,23 @@ pub fn run_mitigation_server_with_ratelimit(
     latency_sum_us: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let waf_engine = Arc::new(r_nads_waf::WafEngine::new(r_nads_waf::WafConfig::default()));
+    let fingerprint_engine = Arc::new(r_nads_fingerprint::FingerprintEngine::with_default_key());
+    let bot_engine = Arc::new(r_nads_bot_detection::BotDetectionEngine::new());
     run_mitigation_server_full(
         bind_addr,
         blocklist,
         config,
         rate_limiter,
         waf_engine,
+        fingerprint_engine,
+        bot_engine,
         running,
         packet_counter,
         latency_sum_us,
     )
 }
 
-/// Runs a high-performance mitigation server with rate limiter and WAF inspection engine.
+/// Runs a high-performance mitigation server with rate limiter, WAF, and identity intelligence.
 #[allow(clippy::too_many_arguments)]
 pub fn run_mitigation_server_full(
     bind_addr: &str,
@@ -67,6 +71,8 @@ pub fn run_mitigation_server_full(
     config: Arc<RwLock<SystemConfig>>,
     rate_limiter: Arc<r_nads_ratelimit::MultiDimensionalRateLimiter>,
     waf_engine: Arc<r_nads_waf::WafEngine>,
+    fingerprint_engine: Arc<r_nads_fingerprint::FingerprintEngine>,
+    bot_engine: Arc<r_nads_bot_detection::BotDetectionEngine>,
     running: Arc<AtomicBool>,
     packet_counter: Arc<AtomicU64>,
     latency_sum_us: Arc<AtomicU64>,
@@ -228,6 +234,55 @@ pub fn run_mitigation_server_full(
                             .with_header(waf_header)
                             .with_header(status_header)
                             .with_header(decision_header);
+
+                    let _ = request.respond(response);
+                    continue;
+                }
+
+                // Identity Intelligence: Privacy Fingerprinting & Bot Classification
+                let client_identity = fingerprint_engine.fingerprint(&sec_req);
+                let bot_classification = bot_engine.classify(&client_identity, &sec_req);
+
+                if bot_classification.should_block || bot_classification.should_challenge {
+                    let bot_decision = bot_engine.make_decision(&bot_classification, 1);
+                    let is_block = bot_decision.action == DecisionAction::Deny;
+                    let status_code = if is_block { 403 } else { 428 }; // 428 Precondition Required / Challenge
+
+                    let fp_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-Client-Fingerprint: {}",
+                        client_identity.privacy_fingerprint
+                    ))
+                    .unwrap();
+                    let bot_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-Bot-Category: {:?}",
+                        bot_classification.category
+                    ))
+                    .unwrap();
+                    let status_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-Detection-Status: {}",
+                        if is_block {
+                            "BotBlocked"
+                        } else {
+                            "BotChallenged"
+                        }
+                    ))
+                    .unwrap();
+                    let decision_header = tiny_http::Header::from_str(&format!(
+                        "X-RNADS-Decision-ID: {}",
+                        bot_decision.decision_id
+                    ))
+                    .unwrap();
+
+                    let response = Response::from_string(if is_block {
+                        "Bot Access Denied"
+                    } else {
+                        "Challenge Required"
+                    })
+                    .with_status_code(status_code)
+                    .with_header(fp_header)
+                    .with_header(bot_header)
+                    .with_header(status_header)
+                    .with_header(decision_header);
 
                     let _ = request.respond(response);
                     continue;
