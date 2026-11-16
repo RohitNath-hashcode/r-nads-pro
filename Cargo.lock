@@ -865,8 +865,11 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "r-nads-aggregator",
+ "r-nads-bot-detection",
  "r-nads-common",
  "r-nads-decision",
+ "r-nads-fingerprint",
+ "r-nads-http",
  "r-nads-inference",
  "r-nads-ratelimit",
 ]

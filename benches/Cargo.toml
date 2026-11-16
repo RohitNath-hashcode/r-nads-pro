@@ -9,6 +9,9 @@ r-nads-decision = { path = "../crates/core/r-nads-decision" }
 r-nads-aggregator = { path = "../crates/network/r-nads-aggregator" }
 r-nads-inference = { path = "../crates/network/r-nads-inference" }
 r-nads-ratelimit = { path = "../crates/traffic/r-nads-ratelimit" }
+r-nads-http = { path = "../crates/waf/r-nads-http" }
+r-nads-fingerprint = { path = "../crates/identity/r-nads-fingerprint" }
+r-nads-bot-detection = { path = "../crates/identity/r-nads-bot-detection" }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -21,4 +24,9 @@ harness = false
 [[bench]]
 name = "ratelimit_bench"
 path = "ratelimit_bench.rs"
+harness = false
+
+[[bench]]
+name = "identity_bench"
+path = "identity_bench.rs"
 harness = false
