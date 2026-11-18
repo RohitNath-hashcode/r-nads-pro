@@ -1,0 +1,21 @@
+[package]
+name = "r-nads-policy"
+version = "0.1.0"
+edition = "2021"
+description = "Fleet security policy schemas, versioning, and Ed25519 signing for R-NADS Pro"
+license = "Apache-2.0"
+
+[dependencies]
+r-nads-decision = { path = "../../core/r-nads-decision" }
+r-nads-ratelimit = { path = "../../traffic/r-nads-ratelimit" }
+r-nads-waf = { path = "../../waf/r-nads-waf" }
+
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "1.0"
+
+[dev-dependencies]

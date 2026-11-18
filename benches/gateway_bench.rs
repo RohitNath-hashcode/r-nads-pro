@@ -94,10 +94,9 @@ fn bench_gateway_security_pipeline(c: &mut Criterion) {
     c.bench_function("pingora_gateway_full_security_filter", |b| {
         b.iter(|| {
             // 1. Rate Limiting Check
-            let rate_decision =
-                proxy
-                    .rate_limiter
-                    .evaluate(req.client_ip, Some(&req.canonical_path));
+            let rate_decision = proxy
+                .rate_limiter
+                .evaluate(req.client_ip, Some(&req.canonical_path));
             black_box(&rate_decision);
 
             // 2. Identity Fingerprinting

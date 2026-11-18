@@ -1,0 +1,23 @@
+[package]
+name = "r-nads-controller"
+version = "0.1.0"
+edition = "2021"
+description = "Central fleet control plane and policy distributor for R-NADS Pro"
+
+[dependencies]
+r-nads-common = { path = "../../crates/core/r-nads-common" }
+r-nads-decision = { path = "../../crates/core/r-nads-decision" }
+r-nads-policy = { path = "../../crates/core/r-nads-policy" }
+r-nads-config = { path = "../../crates/core/r-nads-config" }
+
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiny_http = "0.12"
+dashmap = "5.5"
+ctrlc = "3.4"
+hex = "0.4"
+log = "0.4"
+
+[dev-dependencies]
