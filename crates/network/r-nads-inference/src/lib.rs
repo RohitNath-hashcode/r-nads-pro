@@ -20,6 +20,13 @@ pub fn get_drift_detector() -> &'static DriftDetector {
     DRIFT_DETECTOR.get_or_init(DriftDetector::new)
 }
 
+/// Global static online dynamic normalizer using Welford's algorithm with exponential decay.
+pub static ONLINE_NORMALIZER: OnceLock<OnlineNormalizer> = OnceLock::new();
+
+pub fn get_online_normalizer() -> &'static OnlineNormalizer {
+    ONLINE_NORMALIZER.get_or_init(OnlineNormalizer::new)
+}
+
 pub mod serde_arrays {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -206,6 +213,143 @@ impl DriftDetector {
     }
 }
 
+/// Thread-safe online streaming normalizer using Welford's algorithm with exponential decay (EWMA).
+/// Operates in O(1) time and memory per incoming sample without storing historical flow buffers.
+/// Accommodates natural diurnal shifts (day vs night traffic curves) while detecting sudden attack residuals.
+pub struct OnlineNormalizer {
+    mean_bits: [AtomicU64; 12],
+    var_bits: [AtomicU64; 12],
+    sample_count: AtomicU64,
+}
+
+impl Default for OnlineNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OnlineNormalizer {
+    pub fn new() -> Self {
+        // Initialize 12 feature dimensions with zeros
+        Self {
+            mean_bits: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            var_bits: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            sample_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Seeds the initial baseline parameters from model config (if starting with pre-trained weights).
+    pub fn seed(&self, initial_means: &[f64; 12], initial_stddevs: &[f64; 12]) {
+        for i in 0..12 {
+            self.mean_bits[i].store(initial_means[i].to_bits(), Ordering::Relaxed);
+            let var = initial_stddevs[i] * initial_stddevs[i];
+            self.var_bits[i].store(var.to_bits(), Ordering::Relaxed);
+        }
+        self.sample_count.store(1000, Ordering::Relaxed); // Set warmed up
+    }
+
+    /// Incrementally updates running mean and variance using Welford's formula with EWMA decay,
+    /// returning the normalized Z-scores for all 12 dimensions in O(1) time.
+    #[inline]
+    pub fn update_and_normalize(&self, x: &[f64; 12]) -> [f64; 12] {
+        let count = self.sample_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Adaptive alpha: during initial warmup (first 1000 samples) adapt rapidly,
+        // then smoothly track diurnal traffic transitions (alpha = 0.0005)
+        let alpha = if count < 1000 {
+            1.0 / count as f64
+        } else {
+            0.0005
+        };
+
+        let mut z = [0.0; 12];
+
+        for i in 0..12 {
+            let sample = x[i];
+
+            // 1. Lock-free Atomic EWMA Update of Running Mean
+            let mut curr_mean_bits = self.mean_bits[i].load(Ordering::Relaxed);
+            let mut new_mean;
+            let mut old_mean;
+            loop {
+                old_mean = f64::from_bits(curr_mean_bits);
+                new_mean = if count == 1 {
+                    sample
+                } else {
+                    old_mean * (1.0 - alpha) + sample * alpha
+                };
+                match self.mean_bits[i].compare_exchange_weak(
+                    curr_mean_bits,
+                    new_mean.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => curr_mean_bits = actual,
+                }
+            }
+
+            // 2. Lock-free Atomic Welford Incremental Variance Update
+            // Welford delta: (x - old_mean) * (x - new_mean)
+            let delta = sample - old_mean;
+            let delta2 = sample - new_mean;
+            let sample_var = delta * delta2;
+
+            let mut curr_var_bits = self.var_bits[i].load(Ordering::Relaxed);
+            let mut new_var;
+            loop {
+                let old_var = f64::from_bits(curr_var_bits);
+                new_var = if count == 1 {
+                    1.0 // Initial unit variance fallback
+                } else {
+                    (old_var * (1.0 - alpha) + sample_var * alpha).max(1e-7)
+                };
+                match self.var_bits[i].compare_exchange_weak(
+                    curr_var_bits,
+                    new_var.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => curr_var_bits = actual,
+                }
+            }
+
+            // 3. Compute dynamic, adaptive Z-score
+            let stddev = new_var.sqrt().max(1e-7);
+            z[i] = (sample - new_mean) / stddev;
+        }
+
+        z
+    }
+}
+
 /// Support Vector Data Description (SVDD) classifier with Random Fourier Features (RFF).
 pub struct InferenceEngine;
 
@@ -219,12 +363,13 @@ impl InferenceEngine {
             .get()
             .expect("MODEL_CONFIG must be initialized");
 
-        // 1. Z-Score Normalization
+        // 1. Online Dynamic Normalization via Welford + EWMA
+        // Uses log-compressed rates to prevent scale bias between off-peak and peak hours.
         let x = [
             metrics.mean_len,
             metrics.var_len.sqrt(),
-            metrics.packet_rate,
-            metrics.byte_rate,
+            (1.0 + metrics.packet_rate).ln(),
+            (1.0 + metrics.byte_rate).ln(),
             metrics.fwd_bwd_ratio,
             metrics.syn_ratio,
             metrics.rst_ratio,
@@ -235,10 +380,7 @@ impl InferenceEngine {
             metrics.var_interval.sqrt(),
         ];
 
-        let mut z = [0.0; 12];
-        for i in 0..12 {
-            z[i] = (x[i] - config.means[i]) / config.stddevs[i].max(1e-7);
-        }
+        let z = get_online_normalizer().update_and_normalize(&x);
 
         // 2. Random Fourier Features (RFF) mapping
         let scale = (2.0 / PROJECTION_DIM as f64).sqrt();
@@ -326,14 +468,14 @@ impl InferenceEngine {
             return Err("Cannot train on an empty sample set".into());
         }
 
-        // 1. Compute means
+        // 1. Compute means with log-compressed rates
         let mut means = [0.0; 12];
         for s in samples {
             let x = [
                 s.mean_len,
                 s.var_len.sqrt(),
-                s.packet_rate,
-                s.byte_rate,
+                (1.0 + s.packet_rate).ln(),
+                (1.0 + s.byte_rate).ln(),
                 s.fwd_bwd_ratio,
                 s.syn_ratio,
                 s.rst_ratio,
@@ -357,8 +499,8 @@ impl InferenceEngine {
             let x = [
                 s.mean_len,
                 s.var_len.sqrt(),
-                s.packet_rate,
-                s.byte_rate,
+                (1.0 + s.packet_rate).ln(),
+                (1.0 + s.byte_rate).ln(),
                 s.fwd_bwd_ratio,
                 s.syn_ratio,
                 s.rst_ratio,
@@ -384,8 +526,8 @@ impl InferenceEngine {
             let x = [
                 s.mean_len,
                 s.var_len.sqrt(),
-                s.packet_rate,
-                s.byte_rate,
+                (1.0 + s.packet_rate).ln(),
+                (1.0 + s.byte_rate).ln(),
                 s.fwd_bwd_ratio,
                 s.syn_ratio,
                 s.rst_ratio,
@@ -620,6 +762,35 @@ mod tests {
         assert_eq!(deserialized.trained_at, 1700000000);
         assert!((deserialized.threshold - config.threshold).abs() < 1e-9);
         assert!((deserialized.centroid[0] - config.centroid[0]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_online_normalizer_welford_smooth_adaptation() {
+        let normalizer = OnlineNormalizer::new();
+        // 1. Off-peak night traffic: packet rate around 50 PPS (ln(51) ~ 3.93)
+        let off_peak_rates = [
+            100.0, 10.0, 3.93, 8.0, 1.0, 0.1, 0.0, 0.0, 0.1, 0.9, 10.0, 2.0,
+        ];
+        for _ in 0..1000 {
+            let _ = normalizer.update_and_normalize(&off_peak_rates);
+        }
+
+        // 2. Daytime climb: traffic gradually rises to 500 PPS (ln(501) ~ 6.21) over 5000 iterations
+        let peak_rates = [
+            100.0, 10.0, 6.21, 10.0, 1.0, 0.1, 0.0, 0.0, 0.1, 0.9, 8.0, 1.8,
+        ];
+        let mut final_z = [0.0; 12];
+        for _ in 0..5000 {
+            final_z = normalizer.update_and_normalize(&peak_rates);
+        }
+
+        // The Z-score for the rate dimension (index 2) must smoothly adapt to normal range (< 2.5),
+        // rather than exploding to hundreds of standard deviations.
+        assert!(
+            final_z[2].abs() < 2.5,
+            "Online normalizer should have adapted to peak traffic, got z = {}",
+            final_z[2]
+        );
     }
 
     #[test]
