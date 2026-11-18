@@ -2,6 +2,7 @@
 
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use unicode_normalization::UnicodeNormalization;
@@ -104,19 +105,22 @@ impl SecurityRequest {
 
 /// Recursively decodes percentage-encoded strings to defeat double-URL encoding attacks
 /// (e.g., `%252e%252e%252f` -> `../`). Max recursion depth capped at 5 to prevent CPU exhaustion.
-pub fn recursive_percent_decode(input: &str) -> String {
+pub fn recursive_percent_decode(input: &str) -> Cow<'_, str> {
+    if !input.contains('%') {
+        return Cow::Borrowed(input);
+    }
     let mut current = input.to_string();
     for _ in 0..5 {
         let decoded = match percent_decode_str(&current).decode_utf8() {
             Ok(s) => s.to_string(),
-            Err(_) => return current,
+            Err(_) => return Cow::Owned(current),
         };
         if decoded == current {
             break;
         }
         current = decoded;
     }
-    current
+    Cow::Owned(current)
 }
 
 /// Performs comprehensive canonical path normalization:
@@ -126,17 +130,44 @@ pub fn recursive_percent_decode(input: &str) -> String {
 /// 4. Converts Windows backslashes `\` to standard forward slashes `/`.
 /// 5. Resolves relative path traversals (`/./`, `/../`).
 pub fn normalize_path(raw_path: &str) -> String {
-    // 1. Strip null bytes
-    let clean = raw_path.replace('\0', "");
+    // Fast path: if path contains no special evasion characters, avoid allocations
+    if !raw_path.contains(['\0', '%', '\\']) && raw_path.is_ascii() && !raw_path.contains("/.") {
+        let mut segments: Vec<&str> = Vec::new();
+        for seg in raw_path.split('/') {
+            if !seg.is_empty() {
+                segments.push(seg);
+            }
+        }
+        return if segments.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", segments.join("/"))
+        };
+    }
+
+    // 1. Strip null bytes if present
+    let clean: Cow<'_, str> = if raw_path.contains('\0') {
+        Cow::Owned(raw_path.replace('\0', ""))
+    } else {
+        Cow::Borrowed(raw_path)
+    };
 
     // 2. Recursive percent decode
     let decoded = recursive_percent_decode(&clean);
 
     // 3. Unicode NFKC normalization
-    let normalized_unicode: String = decoded.nfkc().collect();
+    let normalized_unicode: Cow<'_, str> = if decoded.is_ascii() {
+        decoded
+    } else {
+        Cow::Owned(decoded.nfkc().collect())
+    };
 
     // 4. Convert backslashes to forward slashes
-    let forward_slashed = normalized_unicode.replace('\\', "/");
+    let forward_slashed: Cow<'_, str> = if normalized_unicode.contains('\\') {
+        Cow::Owned(normalized_unicode.replace('\\', "/"))
+    } else {
+        normalized_unicode
+    };
 
     // 5. Canonicalize path segments
     let mut segments: Vec<&str> = Vec::new();
@@ -165,8 +196,11 @@ pub fn parse_and_normalize_query(query: &str) -> Vec<(String, String)> {
             continue;
         }
         let (k, v) = match pair.split_once('=') {
-            Some((key, val)) => (recursive_percent_decode(key), recursive_percent_decode(val)),
-            None => (recursive_percent_decode(pair), String::new()),
+            Some((key, val)) => (
+                recursive_percent_decode(key).into_owned(),
+                recursive_percent_decode(val).into_owned(),
+            ),
+            None => (recursive_percent_decode(pair).into_owned(), String::new()),
         };
         params.push((k, v));
     }

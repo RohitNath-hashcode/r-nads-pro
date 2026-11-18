@@ -219,11 +219,10 @@ impl WafEngine {
             }
         }
 
-        // 4. Inspect Request Body (if available and UTF-8 decoded)
+        // 4. Inspect Request Body (if available, using lossy UTF-8 to prevent binary evasion)
         if let Some(ref body) = req.body_bytes {
-            if let Ok(body_str) = std::str::from_utf8(body) {
-                self.inspect_target("REQUEST_BODY", body_str, &mut violations);
-            }
+            let body_str = String::from_utf8_lossy(body);
+            self.inspect_target("REQUEST_BODY", &body_str, &mut violations);
         }
 
         violations
