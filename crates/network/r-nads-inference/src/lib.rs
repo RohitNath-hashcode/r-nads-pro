@@ -794,6 +794,33 @@ mod tests {
     }
 
     #[test]
+    fn test_online_normalizer_detects_sudden_attack_spike() {
+        let normalizer = OnlineNormalizer::new();
+        // 1. Train on normal daytime traffic at 200 PPS (ln(201) ~ 5.30)
+        let normal_traffic = [
+            120.0, 15.0, 5.30, 8.5, 1.0, 0.1, 0.0, 0.0, 0.1, 0.9, 10.0, 2.0,
+        ];
+        for _ in 0..1000 {
+            let _ = normalizer.update_and_normalize(&normal_traffic);
+        }
+
+        // 2. Sudden, explosive SYN flood: 50,000 PPS of pure SYN packets (syn_ratio = 1.0, ack_ratio = 0.0, rate = ln(50001) ~ 10.82)
+        let attack_traffic = [
+            60.0, 0.0, 10.82, 12.0, 100.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.001,
+        ];
+        let attack_z = normalizer.update_and_normalize(&attack_traffic);
+
+        // The attack arrives in milliseconds, completely outpacing the decay factor.
+        // It must produce an extreme Z-score outlier on the SYN flag (index 5) and rate (index 2).
+        assert!(
+            attack_z[2] > 5.0 || attack_z[5] > 5.0,
+            "Attack spike must trigger an extreme outlier, got rate_z = {}, syn_z = {}",
+            attack_z[2],
+            attack_z[5]
+        );
+    }
+
+    #[test]
     fn test_drift_detector() {
         let detector = DriftDetector::new();
         // Warmup with baseline
