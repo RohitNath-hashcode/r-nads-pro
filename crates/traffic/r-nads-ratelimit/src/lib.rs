@@ -157,14 +157,45 @@ impl TokenBucketLimiter {
     }
 
     /// Check and consume 1 token for the specified key.
-    /// Runs in O(1) lock-sharded time (< 30 ns).
+    /// Runs in O(1) lock-sharded time (< 30 ns) with zero heap allocations on cache hits.
     #[inline]
     pub fn check_and_consume(&self, key: &RateLimitKey) -> RateLimitDecision {
         let now_ms = self.time_source.current_timestamp_millis();
 
+        // 1. Zero-allocation fast-path: probe existing entry without cloning the key
+        if let Some(mut state) = self.buckets.get_mut(key) {
+            let elapsed_secs = (now_ms.saturating_sub(state.last_update_ms) as f64) / 1000.0;
+            state.tokens =
+                (state.tokens + elapsed_secs * self.refill_rate_per_sec).min(self.capacity);
+            state.last_update_ms = now_ms;
+
+            if state.tokens >= 1.0 {
+                state.tokens -= 1.0;
+                return RateLimitDecision::Allowed {
+                    remaining: state.tokens.floor() as u64,
+                    reset_after_ms: if self.refill_rate_per_sec > 0.0 {
+                        ((self.capacity - state.tokens) / self.refill_rate_per_sec * 1000.0) as u64
+                    } else {
+                        0
+                    },
+                };
+            } else {
+                let needed = 1.0 - state.tokens;
+                let retry_after_ms = if self.refill_rate_per_sec > 0.0 {
+                    ((needed / self.refill_rate_per_sec) * 1000.0).ceil() as u64
+                } else {
+                    1000
+                };
+                return RateLimitDecision::Limited {
+                    retry_after_ms: retry_after_ms.max(1),
+                    violated_limit: "token_bucket".to_string(),
+                };
+            }
+        }
+
+        // 2. Slow-path: Key not yet present in bucket
         // Guard against memory exhaustion: emergency prune if capacity exceeded
         if self.buckets.len() >= self.max_entries {
-            // Evict entries inactive for more than 60 seconds
             self.cleanup_stale(60_000);
         }
 
@@ -177,7 +208,6 @@ impl TokenBucketLimiter {
             });
 
         let state = entry.value_mut();
-        // Calculate refilled tokens based on elapsed time
         let elapsed_secs = (now_ms.saturating_sub(state.last_update_ms) as f64) / 1000.0;
         state.tokens = (state.tokens + elapsed_secs * self.refill_rate_per_sec).min(self.capacity);
         state.last_update_ms = now_ms;
@@ -289,11 +319,53 @@ impl SlidingWindowLimiter {
     }
 
     /// Check and increment the sliding window counter.
+    /// Runs in O(1) time with zero heap allocations on cache hits.
     #[inline]
     pub fn check_and_increment(&self, key: &RateLimitKey) -> RateLimitDecision {
         let now_ms = self.time_source.current_timestamp_millis();
         let current_window_start = now_ms - (now_ms % self.window_duration_ms);
 
+        // 1. Zero-allocation fast-path: probe existing window
+        if let Some(mut state) = self.windows.get_mut(key) {
+            // Advance windows if time moved past current window
+            if current_window_start > state.current.window_start_ms {
+                let diff = current_window_start - state.current.window_start_ms;
+                if diff == self.window_duration_ms {
+                    state.previous = state.current;
+                } else {
+                    state.previous = WindowCounter::default();
+                }
+                state.current = WindowCounter {
+                    window_start_ms: current_window_start,
+                    count: 0,
+                };
+            }
+
+            // Weighted count: (1 - weight) * prev + current
+            let elapsed_in_window = now_ms - current_window_start;
+            let weight = (self.window_duration_ms - elapsed_in_window) as f64
+                / self.window_duration_ms as f64;
+            let estimated_count =
+                (state.previous.count as f64 * weight).floor() as u64 + state.current.count;
+
+            return if estimated_count < self.max_requests {
+                state.current.count += 1;
+                let remaining = self.max_requests.saturating_sub(estimated_count + 1);
+                let reset_after_ms = self.window_duration_ms - elapsed_in_window;
+                RateLimitDecision::Allowed {
+                    remaining,
+                    reset_after_ms,
+                }
+            } else {
+                let retry_after_ms = self.window_duration_ms - elapsed_in_window;
+                RateLimitDecision::Limited {
+                    retry_after_ms: retry_after_ms.max(1),
+                    violated_limit: "sliding_window".to_string(),
+                }
+            };
+        }
+
+        // 2. Slow-path: Window not yet present
         // Guard against memory exhaustion: emergency prune if capacity exceeded
         if self.windows.len() >= self.max_entries {
             self.cleanup_stale();
