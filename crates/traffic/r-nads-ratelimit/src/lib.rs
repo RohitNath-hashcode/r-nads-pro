@@ -24,6 +24,10 @@ pub enum RateLimitKey {
     ApiKey(String),
     /// Composite: Specific IP hitting a specific Route
     IpAndRoute(IpAddr, String),
+    /// Multi-Tenant IP: Scoped IP rate limit per tenant
+    TenantAndIp(String, IpAddr),
+    /// Multi-Tenant Route: Scoped route rate limit per tenant
+    TenantAndRoute(String, String),
 }
 
 impl RateLimitKey {
@@ -31,6 +35,18 @@ impl RateLimitKey {
     #[inline]
     pub fn from_ip(ip: IpAddr) -> Self {
         Self::Ip(canonicalize_ip(ip))
+    }
+
+    /// Creates a tenant-scoped IP key.
+    #[inline]
+    pub fn from_tenant_and_ip(tenant_id: &str, ip: IpAddr) -> Self {
+        Self::TenantAndIp(tenant_id.to_string(), canonicalize_ip(ip))
+    }
+
+    /// Creates a tenant-scoped route key.
+    #[inline]
+    pub fn from_tenant_and_route(tenant_id: &str, route: &str) -> Self {
+        Self::TenantAndRoute(tenant_id.to_string(), route.to_string())
     }
 
     /// Creates a subnet key (/24 for IPv4, /64 for IPv6).

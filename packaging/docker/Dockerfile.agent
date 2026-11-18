@@ -1,0 +1,35 @@
+# Multi-Stage Production Dockerfile for R-NADS Agent
+FROM rust:1.80-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    libsqlite3-dev \
+    pkg-config \
+    libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/r-nads
+COPY . .
+
+RUN cargo build --release --bin r-nads-agent
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    libpcap0.8 \
+    libsqlite3-0 \
+    sqlite3 \
+    iptables \
+    nftables \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /usr/src/r-nads/target/release/r-nads-agent /app/r-nads-agent
+COPY --from=builder /usr/src/r-nads/config.toml /app/config.toml
+
+# Expose mitigation and telemetry ports
+EXPOSE 8080 18090
+
+ENTRYPOINT ["/app/r-nads-agent"]
+

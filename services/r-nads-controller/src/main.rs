@@ -79,6 +79,7 @@ impl FleetController {
     fn with_signing_key(tenant_id: &str, signing_key: SigningKey) -> Self {
         let initial_policy = SecurityPolicyBundle {
             tenant_id: tenant_id.to_string(),
+            app_id: None,
             policy_version: 1,
             created_at_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -112,6 +113,7 @@ impl FleetController {
         let next_version = self.policy_version_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let policy = SecurityPolicyBundle {
             tenant_id: tenant_id.to_string(),
+            app_id: None,
             policy_version: next_version,
             created_at_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

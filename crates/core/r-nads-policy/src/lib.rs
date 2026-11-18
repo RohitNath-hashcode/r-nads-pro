@@ -35,12 +35,118 @@ pub enum PolicyError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SecurityPolicyBundle {
     pub tenant_id: String,
+    pub app_id: Option<String>,
     pub policy_version: u64,
     pub created_at_unix: u64,
     pub expires_at_unix: Option<u64>,
     pub blocked_ips: BTreeSet<IpAddr>,
     pub rate_limits: PolicyRateLimits,
     pub waf_rules: PolicyWafRules,
+}
+
+/// Standardized enterprise security profile presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SecurityProfile {
+    /// High-sensitivity profile: strict burst capacity, aggressive WAF blocking, 100 KB max body.
+    Strict,
+    /// Balanced standard production profile: 100 burst, balanced WAF and rate limits.
+    Balanced,
+    /// Audit-only / Canary profile: monitoring mode enabled, high rate tolerance.
+    Permissive,
+    /// Optimized for REST and GraphQL API gateways: high request rates, strict WAF, 256 KB max body.
+    ApiGateway,
+    /// Optimized for Edge CDN environments: high throughput, subnet rate-limiting priority.
+    CdnEdge,
+}
+
+impl SecurityProfile {
+    /// Generates a validated `SecurityPolicyBundle` instance from the preset profile.
+    pub fn to_policy_bundle(
+        &self,
+        tenant_id: &str,
+        app_id: Option<&str>,
+        policy_version: u64,
+        created_at_unix: u64,
+    ) -> SecurityPolicyBundle {
+        let (rate_limits, waf_rules) = match self {
+            SecurityProfile::Strict => (
+                PolicyRateLimits {
+                    ip_burst: 30,
+                    ip_refill_per_sec: 5.0,
+                    subnet_requests_per_min: 300,
+                    route_burst: 15,
+                    route_refill_per_sec: 2.5,
+                },
+                PolicyWafRules {
+                    enabled: true,
+                    block_mode: true,
+                    max_body_bytes: 64 * 1024,
+                    custom_block_patterns: Vec::new(),
+                },
+            ),
+            SecurityProfile::Balanced => (PolicyRateLimits::default(), PolicyWafRules::default()),
+            SecurityProfile::Permissive => (
+                PolicyRateLimits {
+                    ip_burst: 500,
+                    ip_refill_per_sec: 100.0,
+                    subnet_requests_per_min: 5000,
+                    route_burst: 200,
+                    route_refill_per_sec: 50.0,
+                },
+                PolicyWafRules {
+                    enabled: true,
+                    block_mode: false, // Audit only
+                    max_body_bytes: 128 * 1024,
+                    custom_block_patterns: Vec::new(),
+                },
+            ),
+            SecurityProfile::ApiGateway => (
+                PolicyRateLimits {
+                    ip_burst: 200,
+                    ip_refill_per_sec: 50.0,
+                    subnet_requests_per_min: 2000,
+                    route_burst: 100,
+                    route_refill_per_sec: 25.0,
+                },
+                PolicyWafRules {
+                    enabled: true,
+                    block_mode: true,
+                    max_body_bytes: 256 * 1024,
+                    custom_block_patterns: vec![
+                        "../".to_string(),
+                        "exec(".to_string(),
+                        "eval(".to_string(),
+                    ],
+                },
+            ),
+            SecurityProfile::CdnEdge => (
+                PolicyRateLimits {
+                    ip_burst: 1000,
+                    ip_refill_per_sec: 200.0,
+                    subnet_requests_per_min: 10000,
+                    route_burst: 500,
+                    route_refill_per_sec: 100.0,
+                },
+                PolicyWafRules {
+                    enabled: true,
+                    block_mode: true,
+                    max_body_bytes: 512 * 1024,
+                    custom_block_patterns: Vec::new(),
+                },
+            ),
+        };
+
+        SecurityPolicyBundle {
+            tenant_id: tenant_id.to_string(),
+            app_id: app_id.map(|s| s.to_string()),
+            policy_version,
+            created_at_unix,
+            expires_at_unix: None,
+            blocked_ips: BTreeSet::new(),
+            rate_limits,
+            waf_rules,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -235,6 +341,7 @@ mod tests {
 
         let policy = SecurityPolicyBundle {
             tenant_id: "tenant_corp_global".to_string(),
+            app_id: Some("auth-service".to_string()),
             policy_version: 1,
             created_at_unix: 1700000000,
             expires_at_unix: None,
@@ -262,6 +369,7 @@ mod tests {
 
         let policy_v1 = SecurityPolicyBundle {
             tenant_id: "corp".to_string(),
+            app_id: None,
             policy_version: 1,
             created_at_unix: 1700000000,
             expires_at_unix: None,
@@ -272,6 +380,7 @@ mod tests {
 
         let policy_v2 = SecurityPolicyBundle {
             tenant_id: "corp".to_string(),
+            app_id: None,
             policy_version: 2,
             created_at_unix: 1700000010,
             expires_at_unix: None,
@@ -310,6 +419,7 @@ mod tests {
 
         let policy = SecurityPolicyBundle {
             tenant_id: "corp_edge".to_string(),
+            app_id: None,
             policy_version: 42,
             created_at_unix: 1700000000,
             expires_at_unix: None,
@@ -328,5 +438,27 @@ mod tests {
         assert_eq!(loaded, envelope);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_security_profiles_to_policy_bundle() {
+        let strict =
+            SecurityProfile::Strict.to_policy_bundle("tenant_a", Some("checkout"), 1, 1000);
+        assert_eq!(strict.tenant_id, "tenant_a");
+        assert_eq!(strict.app_id, Some("checkout".to_string()));
+        assert_eq!(strict.rate_limits.ip_burst, 30);
+        assert!(strict.waf_rules.block_mode);
+        assert_eq!(strict.waf_rules.max_body_bytes, 64 * 1024);
+
+        let permissive = SecurityProfile::Permissive.to_policy_bundle("tenant_b", None, 1, 1000);
+        assert_eq!(permissive.tenant_id, "tenant_b");
+        assert_eq!(permissive.app_id, None);
+        assert_eq!(permissive.rate_limits.ip_burst, 500);
+        assert!(!permissive.waf_rules.block_mode);
+
+        let api = SecurityProfile::ApiGateway.to_policy_bundle("tenant_c", None, 1, 1000);
+        assert_eq!(api.rate_limits.ip_burst, 200);
+        assert_eq!(api.waf_rules.max_body_bytes, 256 * 1024);
+        assert!(!api.waf_rules.custom_block_patterns.is_empty());
     }
 }

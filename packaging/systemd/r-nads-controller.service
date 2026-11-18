@@ -1,0 +1,27 @@
+[Unit]
+Description=R-NADS Pro Fleet Controller & Policy Distribution Daemon
+Documentation=https://github.com/RohitNath-hashcode/r-nads-pro
+After=network.target
+
+[Service]
+Type=simple
+User=rnads
+Group=rnads
+ExecStart=/usr/local/bin/r-nads-controller --bind 0.0.0.0:8089 --key /etc/r-nads/controller.key
+Restart=always
+RestartSec=3s
+
+# Security Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ReadWritePaths=/var/lib/r-nads/controller
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+

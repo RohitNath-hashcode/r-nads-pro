@@ -1,0 +1,26 @@
+[Unit]
+Description=R-NADS Pro Anomaly Detection & Mitigation Daemon
+Documentation=https://github.com/RohitNath-hashcode/r-nads-pro
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/r-nads-agent --config /etc/r-nads/config.toml
+Restart=always
+RestartSec=5s
+
+# Security Hardening & Sandboxing
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/r-nads /var/log/r-nads
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target
+

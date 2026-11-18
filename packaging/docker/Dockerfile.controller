@@ -1,0 +1,33 @@
+# Multi-Stage Production Dockerfile for R-NADS Controller
+FROM rust:1.80-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/r-nads
+COPY . .
+
+RUN cargo build --release --bin r-nads-controller
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Run as non-root unprivileged service account
+RUN useradd -m -u 10001 -s /usr/sbin/nologin rnads
+
+WORKDIR /app
+COPY --from=builder /usr/src/r-nads/target/release/r-nads-controller /app/r-nads-controller
+
+RUN chown -R rnads:rnads /app
+USER rnads
+
+# Default policy and heartbeat port
+EXPOSE 8089
+
+ENTRYPOINT ["/app/r-nads-controller"]
+
