@@ -244,14 +244,15 @@ impl InferenceEngine {
         let scale = (2.0 / PROJECTION_DIM as f64).sqrt();
         let mut z_projected = [0.0; PROJECTION_DIM];
 
-        for j in 0..PROJECTION_DIM {
-            let mut proj = 0.0;
+        for (j, z_proj) in z_projected.iter_mut().enumerate().take(PROJECTION_DIM) {
             let w_row = &config.w_matrix[j];
-            for i in 0..12 {
-                proj += w_row[i] * z[i];
-            }
-            proj += config.b_vector[j];
-            z_projected[j] = scale * proj.cos();
+            let proj: f64 = w_row
+                .iter()
+                .zip(z.iter())
+                .map(|(&w, &val)| w * val)
+                .sum::<f64>()
+                + config.b_vector[j];
+            *z_proj = scale * proj.cos();
         }
 
         // 3. Exact Squared Euclidean Distance to Centroid
@@ -277,12 +278,13 @@ impl InferenceEngine {
     /// Computes squared Euclidean distance.
     #[inline]
     pub fn euclidean_distance_sq(a: &[f64; PROJECTION_DIM], b: &[f64; PROJECTION_DIM]) -> f64 {
-        let mut sum = 0.0;
-        for i in 0..PROJECTION_DIM {
-            let diff = a[i] - b[i];
-            sum += diff * diff;
-        }
-        sum
+        a.iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| {
+                let diff = x - y;
+                diff * diff
+            })
+            .sum()
     }
 
     /// Creates an AnomalyAlert struct from flow metrics and inference result.

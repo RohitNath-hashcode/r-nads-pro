@@ -285,9 +285,16 @@ mod tests {
         let mut payload = Vec::new();
         builder.write(&mut payload, &[]).unwrap();
 
-        // Null scan: zero out TCP flags byte (byte index 47 in ethernet+ipv4+tcp)
-        // Find TCP header start: Ethernet(14) + IPv4(20) = 34. Flags are at offset 13 from TCP header = 47.
-        payload[47] = 0;
+        // Dynamically locate the TCP flags byte offset to avoid assumptions about fixed IP header lengths.
+        // TCP flags byte is offset 13 from the start of the TCP header.
+        let sliced = etherparse::SlicedPacket::from_ethernet(&payload).expect("Valid packet");
+        let tcp_header = sliced.transport.expect("Transport must be present");
+        let tcp_slice = match tcp_header {
+            etherparse::TransportSlice::Tcp(tcp) => tcp.slice(),
+            _ => panic!("Expected TCP transport"),
+        };
+        let tcp_offset = payload.len() - tcp_slice.len();
+        payload[tcp_offset + 13] = 0; // Null scan: all flags cleared
 
         let event = parse_packet(&payload, SystemTime::now()).expect("Packet should parse");
         assert_eq!(event.src_port, 12345);
