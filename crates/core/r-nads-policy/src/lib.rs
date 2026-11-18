@@ -7,7 +7,7 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use thiserror::Error;
@@ -31,13 +31,14 @@ pub enum PolicyError {
 }
 
 /// Core security policy containing multi-tenant rules, rate limits, and blocklists.
+/// Uses `BTreeSet` for `blocked_ips` to guarantee deterministic canonical serialization order.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SecurityPolicyBundle {
     pub tenant_id: String,
     pub policy_version: u64,
     pub created_at_unix: u64,
     pub expires_at_unix: Option<u64>,
-    pub blocked_ips: HashSet<IpAddr>,
+    pub blocked_ips: BTreeSet<IpAddr>,
     pub rate_limits: PolicyRateLimits,
     pub waf_rules: PolicyWafRules,
 }
@@ -140,11 +141,16 @@ impl SignedPolicyEnvelope {
         Ok(())
     }
 
-    /// Saves the signed policy envelope to disk atomically.
+    /// Saves the signed policy envelope to disk atomically (Windows-safe file replacement).
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), PolicyError> {
         let serialized = serde_json::to_string_pretty(self)?;
         let temp_path = format!("{}.tmp", path.as_ref().display());
         std::fs::write(&temp_path, serialized)?;
+
+        // Windows-safe atomic replace: remove destination if already exists before rename
+        if path.as_ref().exists() {
+            let _ = std::fs::remove_file(path.as_ref());
+        }
         std::fs::rename(temp_path, path)?;
         Ok(())
     }
@@ -259,7 +265,7 @@ mod tests {
             policy_version: 1,
             created_at_unix: 1700000000,
             expires_at_unix: None,
-            blocked_ips: HashSet::new(),
+            blocked_ips: BTreeSet::new(),
             rate_limits: PolicyRateLimits::default(),
             waf_rules: PolicyWafRules::default(),
         };
@@ -269,7 +275,7 @@ mod tests {
             policy_version: 2,
             created_at_unix: 1700000010,
             expires_at_unix: None,
-            blocked_ips: HashSet::new(),
+            blocked_ips: BTreeSet::new(),
             rate_limits: PolicyRateLimits::default(),
             waf_rules: PolicyWafRules::default(),
         };
@@ -294,5 +300,33 @@ mod tests {
                 current: 2
             })
         ));
+    }
+
+    #[test]
+    fn test_atomic_file_persistence_and_reload() {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let path = "test_policy_envelope.json";
+
+        let policy = SecurityPolicyBundle {
+            tenant_id: "corp_edge".to_string(),
+            policy_version: 42,
+            created_at_unix: 1700000000,
+            expires_at_unix: None,
+            blocked_ips: ["1.2.3.4".parse().unwrap()].into(),
+            rate_limits: PolicyRateLimits::default(),
+            waf_rules: PolicyWafRules::default(),
+        };
+
+        let envelope = SignedPolicyEnvelope::sign(policy, &signing_key).unwrap();
+        envelope.save_to_file(path).unwrap();
+
+        // Overwrite again to verify atomic replacement on existing file
+        envelope.save_to_file(path).unwrap();
+
+        let loaded = SignedPolicyEnvelope::load_from_file(path).unwrap();
+        assert_eq!(loaded, envelope);
+
+        let _ = std::fs::remove_file(path);
     }
 }
